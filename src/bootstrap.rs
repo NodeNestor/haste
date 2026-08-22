@@ -137,7 +137,10 @@ mod tests {
     fn orients_in_own_repo() {
         let s = workspace_state(Path::new("."));
         assert!(s.contains("project: Rust"), "{s}");
-        assert!(s.contains("src/ [") && s.contains("agent.rs"), "{s}");
+        // src/ has >10 files, so the map falls back to extension counts.
+        assert!(s.contains("src/ [") && s.contains(".rs"), "{s}");
+        // A small dir still lists real filenames.
+        assert!(s.contains("Cargo.toml"), "{s}");
         assert!(s.len() <= MAX_CHARS + 200, "bootstrap too big: {}", s.len());
     }
 
