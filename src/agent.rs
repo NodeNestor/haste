@@ -133,7 +133,10 @@ pub fn run_session(
         ctl.emit(Ev::Turn(i));
         let t_r = Instant::now();
         let doc = renderer.render(ledger, &ctx_cfg, turn);
-        let user = format!("{}{}\n## NOW\nNext commands:\n", ws.legend(), doc);
+        // File legend goes at the BOTTOM: it grows as files intern, and
+        // anything that changes near the top of the document would shift every
+        // byte after it and invalidate the provider's prefix cache.
+        let user = format!("{}\n{}## NOW\nNext commands:\n", doc, ws.legend());
         rep.render_us += t_r.elapsed().as_micros();
         rep.sent_tokens += est_tokens(&system) + est_tokens(&user);
 
@@ -243,6 +246,7 @@ pub fn run_session(
         rep.tool_ms += t_tools.elapsed().as_millis();
 
         if let Some(msg) = done {
+            let msg = clean_final(&msg);
             ledger.push(Kind::Final, turn, msg.clone(), None);
             rep.final_msg = msg;
             break;
@@ -270,6 +274,21 @@ pub fn run_session(
 
 fn first_lines(s: &str, n: usize) -> String {
     s.lines().take(n).collect::<Vec<_>>().join(" | ")
+}
+
+/// D swallows the rest of the stream, so a degenerating model can append
+/// hallucinated prompt scaffolding after its real answer. Cut at the first
+/// scaffold marker; nothing legitimate starts a line with these.
+fn clean_final(msg: &str) -> String {
+    let mut out = Vec::new();
+    for l in msg.lines() {
+        let t = l.trim_start();
+        if t.starts_with("## TASK") || t.starts_with("## LOG") || t.starts_with("## NOW") || t.starts_with("files: #") {
+            break;
+        }
+        out.push(l);
+    }
+    out.join("\n").trim().to_string()
 }
 
 fn verb_of(cmd: &Cmd) -> char {

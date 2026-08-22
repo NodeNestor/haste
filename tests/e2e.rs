@@ -183,6 +183,17 @@ fn event_stream_feeds_a_ui() {
 }
 
 #[test]
+fn final_message_truncates_hallucinated_scaffolding() {
+    let port = mock_server(vec![
+        "D found it in E:\\Repos\\haste\nsecond real line\n## TASK\ndäm\n## LOG\n> X junk\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "find repo", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "found it in E:\\Repos\\haste\nsecond real line");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn loop_breaker_warns_then_refuses() {
     // Model stuck repeating the identical command every turn.
     let same = "G \"wrold\" greet.txt\n";
