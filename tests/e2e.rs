@@ -258,6 +258,26 @@ fn length_cap_writes_partial_and_tells_model_to_continue() {
 }
 
 #[test]
+fn say_speaks_without_ending_the_run() {
+    let port = mock_server(vec!["S found the bug, fixing it now\nX echo work\n", "D fixed\n"]);
+    let root = temp_repo();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None, inbox: None };
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "task", None, 0, ctl);
+    assert_eq!(rep.final_msg, "fixed");
+    assert_eq!(rep.turns, 2, "S must not end the run");
+    let says: Vec<String> = rx
+        .try_iter()
+        .filter_map(|e| match e {
+            haste::agent::Ev::Say(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(says, vec!["found the bug, fixing it now".to_string()]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn view_attaches_image_for_next_turn() {
     let port = mock_server(vec!["V pic.png\n", "D saw it\n"]);
     let root = temp_repo();

@@ -145,6 +145,7 @@ fn drain_events(app: &mut App) -> bool {
                 let pad = "  ".repeat(depth as usize);
                 app.push(DIM, format!("  {pad}  {r}"));
             }
+            Ev::Say(text) => app.push(PLAIN, text),
             Ev::Report(r) => app.push(DIM, format!("  {r}")),
             Ev::Done(msg) => {
                 finish_run(app, msg);

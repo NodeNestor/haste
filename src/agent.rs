@@ -18,6 +18,8 @@ pub enum Ev {
     Delta(String),
     Action(u8, String),
     Result(u8, String),
+    /// The agent speaking to the user mid-run (S verb).
+    Say(String),
     /// End-of-run stats line.
     Report(String),
     Done(String),
@@ -264,7 +266,12 @@ pub fn run_session(
                 rep.final_msg = "(aborted: model produced no commands)".into();
                 break;
             }
-            ledger.push(Kind::Result, turn, "no commands parsed — emit DSL command lines only".into(), None);
+            ledger.push(
+                Kind::Result,
+                turn,
+                "no commands parsed — plain prose is discarded. Use S <text> to talk to the user, or D to finish".into(),
+                None,
+            );
             continue;
         }
         empty_turns = 0;
@@ -282,6 +289,12 @@ pub fn run_session(
             }
             match cmd {
                 Cmd::Done { msg } => done = Some(msg),
+                Cmd::Say { text } => {
+                    if depth == 0 {
+                        ctl.emit(Ev::Say(text.clone()));
+                    }
+                    ledger.push(Kind::Result, turn, format!("(you told the user: {text})"), None);
+                }
                 Cmd::View { target } => {
                     let act = format!("V {target}");
                     ctl.emit(Ev::Action(depth, act.clone()));
@@ -466,6 +479,7 @@ fn verb_of(cmd: &Cmd) -> char {
         Cmd::Agent { .. } => 'A',
         Cmd::Done { .. } => 'D',
         Cmd::View { .. } => 'V',
+        Cmd::Say { .. } => 'S',
         Cmd::Custom { verb, .. } => *verb,
     }
 }
@@ -488,6 +502,7 @@ fn action_of(cmd: &Cmd) -> String {
         Cmd::Agent { profile, task } => format!("A {profile} {task}"),
         Cmd::Done { .. } => "D".into(),
         Cmd::View { target } => format!("V {target}"),
+        Cmd::Say { text } => format!("S {}", crate::tools::clip(text, 60)),
     }
 }
 
@@ -575,7 +590,7 @@ fn exec_one(
                 None => (act, format!("err: unknown verb {verb}"), None),
             }
         }
-        Cmd::Agent { .. } | Cmd::Done { .. } | Cmd::View { .. } => unreachable!("handled by caller"),
+        Cmd::Agent { .. } | Cmd::Done { .. } | Cmd::View { .. } | Cmd::Say { .. } => unreachable!("handled by caller"),
     };
     ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&result, 3), 400)));
     ledger.push(Kind::Action, turn, action, None);
@@ -633,6 +648,7 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
             s.push_str(&format!("{v} <args>            {}\n", t.desc));
         }
     }
+    s.push_str("S <text>            say one line to the user WITHOUT finishing (progress, questions, findings)\n");
     s.push_str("D <message>         done; message is your final report (may span lines to end of message)\n");
     s.push_str(
         "Rules: files get ids (#0,#1..) listed in the files: header — refer to them by id (with or without #). \

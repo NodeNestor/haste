@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 
 /// Verbs implemented natively in the binary. Config tools must not shadow these.
-pub const NATIVE_VERBS: &str = "REIGNXADV";
+pub const NATIVE_VERBS: &str = "REIGNXADVS";
 
 #[derive(Deserialize, Clone)]
 pub struct Config {

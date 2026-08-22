@@ -23,6 +23,8 @@ pub enum Cmd {
     Done { msg: String },
     /// View an image file: attached to the next model request.
     View { target: String },
+    /// Say something to the user without ending the run.
+    Say { text: String },
     Custom { verb: char, args: String },
 }
 
@@ -147,6 +149,11 @@ impl Lexer {
             'V' => {
                 if !rest.is_empty() {
                     out.push(Cmd::View { target: rest.to_string() });
+                }
+            }
+            'S' => {
+                if !rest.is_empty() {
+                    out.push(Cmd::Say { text: rest.to_string() });
                 }
             }
             'D' => {
