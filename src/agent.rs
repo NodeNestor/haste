@@ -59,6 +59,10 @@ pub struct Report {
     pub sent_tokens: usize,
     pub out_chars: usize,
     pub commands: usize,
+    /// Exact provider-reported usage (0 when the provider doesn't send it).
+    pub tok_in: u64,
+    pub tok_cached: u64,
+    pub tok_out: u64,
 }
 
 /// A continuable session: the ledger, workspace, and renderer survive across
@@ -191,6 +195,9 @@ pub fn run_session(
             let mut summary = String::new();
             if let Ok(s) = client.stream(&system, &cuser, &[], &mut |d| summary.push_str(d)) {
                 rep.model_ms += s.total_ms;
+                rep.tok_in += s.prompt_tokens;
+                rep.tok_cached += s.cached_tokens;
+                rep.tok_out += s.completion_tokens;
                 let summary = clean_final(summary.trim());
                 if !summary.is_empty() {
                     renderer.seal_summary(ledger, ctx_cfg.compact_keep_last, summary);
@@ -223,6 +230,9 @@ pub fn run_session(
                 rep.model_ms += s.total_ms;
                 rep.ttft_ms_sum += s.ttft_ms;
                 rep.out_chars += s.out_chars;
+                rep.tok_in += s.prompt_tokens;
+                rep.tok_cached += s.cached_tokens;
+                rep.tok_out += s.completion_tokens;
                 let fr = s.finish_reason.as_deref();
                 (fr == Some("length"), fr == Some("degenerate"))
             }
@@ -281,6 +291,20 @@ pub fn run_session(
 
         let t_tools = Instant::now();
         let mut done: Option<String> = None;
+        // A turn that is ONLY talk (S with no work and no subagents pending)
+        // means the model is waiting on the user: hand the mic back instead of
+        // looping into ever-rephrased clarification questions.
+        if pending.is_empty() && cmds.iter().all(|c| matches!(c, Cmd::Say { .. })) && !cmds.is_empty() {
+            let text = cmds
+                .drain(..)
+                .map(|c| match c {
+                    Cmd::Say { text } => text,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            done = Some(text);
+        }
         for cmd in cmds {
             if let Some(allow) = &allowed {
                 let v = verb_of(&cmd);
@@ -412,18 +436,37 @@ pub fn run_session(
     session.turn_base = base + rep.turns;
     rep.wall_ms = t_start.elapsed().as_millis();
     if depth == 0 {
+        let tokens = if rep.tok_in > 0 && rep.tok_cached > 0 {
+            format!(
+                "in {} ({}% cached) · out {}",
+                fmt_k(rep.tok_in),
+                rep.tok_cached * 100 / rep.tok_in.max(1),
+                fmt_k(rep.tok_out)
+            )
+        } else if rep.tok_in > 0 {
+            format!("in {} · out {}", fmt_k(rep.tok_in), fmt_k(rep.tok_out))
+        } else {
+            format!("~{}t sent", rep.sent_tokens)
+        };
         ctl.emit(Ev::Report(format!(
-            "{} turn{} · {} cmd{} · {:.1}s · ~{}t sent",
+            "{} turn{} · {} cmd{} · {:.1}s · {tokens}",
             rep.turns,
             if rep.turns == 1 { "" } else { "s" },
             rep.commands,
             if rep.commands == 1 { "" } else { "s" },
             rep.wall_ms as f64 / 1000.0,
-            rep.sent_tokens
         )));
         ctl.emit(Ev::Done(rep.final_msg.clone()));
     }
     rep
+}
+
+fn fmt_k(n: u64) -> String {
+    if n >= 10_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{n}t")
+    }
 }
 
 fn first_lines(s: &str, n: usize) -> String {

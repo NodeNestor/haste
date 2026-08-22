@@ -60,7 +60,11 @@ fn mock_server(scripts: Vec<&'static str>) -> u16 {
                 let ev = serde_json::json!({"choices":[{"delta":{"content":piece}}]});
                 resp.push_str(&format!("data: {ev}\n\n"));
             }
-            let fin = serde_json::json!({"choices":[{"delta":{}, "finish_reason": fr}]});
+            let fin = serde_json::json!({
+                "choices":[{"delta":{}, "finish_reason": fr}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 7,
+                          "prompt_tokens_details": {"cached_tokens": 80}}
+            });
             resp.push_str(&format!("data: {fin}\n\n"));
             resp.push_str("data: [DONE]\n\n");
             let _ = s.write_all(resp.as_bytes());
@@ -276,6 +280,19 @@ fn say_speaks_without_ending_the_run() {
         })
         .collect();
     assert_eq!(says, vec!["found the bug, fixing it now".to_string()]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn solo_say_hands_the_mic_back() {
+    // A clarification question with no work must END the run, not loop.
+    let port = mock_server(vec!["S what would you like me to do?\n"]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "wasu", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "what would you like me to do?");
+    assert_eq!(rep.turns, 1, "solo S must not loop");
+    // Exact usage flows through from the provider.
+    assert_eq!((rep.tok_in, rep.tok_cached, rep.tok_out), (100, 80, 7));
     let _ = std::fs::remove_dir_all(root);
 }
 

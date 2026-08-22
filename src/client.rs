@@ -15,6 +15,10 @@ pub struct StreamStats {
     pub out_chars: usize,
     /// "length" means the output was guillotined by max_tokens mid-message.
     pub finish_reason: Option<String>,
+    /// Exact usage from the provider (0 when not reported).
+    pub prompt_tokens: u64,
+    pub cached_tokens: u64,
+    pub completion_tokens: u64,
 }
 
 impl Client {
@@ -79,6 +83,7 @@ impl Client {
             "max_tokens": self.cfg.max_tokens,
             "temperature": self.cfg.temperature,
             "stream": true,
+            "stream_options": {"include_usage": true},
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},
@@ -101,6 +106,7 @@ impl Client {
         let mut tail: Vec<u8> = Vec::with_capacity(700);
         let mut since_scan = 0usize;
         let mut degenerate = false;
+        let mut usage = (0u64, 0u64, 0u64);
         let reader = BufReader::new(resp.into_reader());
         'outer: for line in reader.lines() {
             let line = line.map_err(|e| format!("stream read: {e}"))?;
@@ -111,6 +117,13 @@ impl Client {
             let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
             if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
                 finish_reason = Some(fr.to_string());
+            }
+            if v["usage"].is_object() {
+                usage = (
+                    v["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
+                    v["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
+                    v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+                );
             }
             if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
                 if !delta.is_empty() {
@@ -153,6 +166,9 @@ impl Client {
             total_ms: t0.elapsed().as_millis(),
             out_chars,
             finish_reason,
+            prompt_tokens: usage.0,
+            cached_tokens: usage.1,
+            completion_tokens: usage.2,
         })
     }
 
