@@ -74,7 +74,9 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn temp_repo() -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("haste-e2e-{}-{:?}", std::process::id(), std::time::Instant::now()).replace([':', ' ', '.'], "-"));
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!("haste-e2e-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&p).unwrap();
     std::fs::write(p.join("greet.txt"), "hello\nwrold\ngoodbye\n").unwrap();
     p

@@ -218,37 +218,32 @@ pub fn run_session(
             }
             lexer.feed(delta, &mut cmds);
         });
-        let mut length_capped = false;
-        let mut degenerated = false;
-        match stream_res {
+        let (length_capped, degenerated) = match stream_res {
             Ok(s) => {
                 rep.model_ms += s.total_ms;
                 rep.ttft_ms_sum += s.ttft_ms;
                 rep.out_chars += s.out_chars;
-                length_capped = s.finish_reason.as_deref() == Some("length");
-                degenerated = s.finish_reason.as_deref() == Some("degenerate");
+                let fr = s.finish_reason.as_deref();
+                (fr == Some("length"), fr == Some("degenerate"))
             }
             Err(e) => {
-                let msg = format!("model error: {e}");
-                ctl.emit(Ev::Result(depth, crate::tools::clip(&msg, 300)));
-                ledger.push(Kind::Result, turn, msg, None);
+                note(ledger, &ctl, depth, turn, format!("model error: {e}"));
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             }
-        }
+        };
         lexer.finish(&mut cmds);
 
         if degenerated {
             degens += 1;
             // Every note is unique text: stacking IDENTICAL lines was itself a
             // repetition attractor that made the next collapse more likely.
-            let note = match degens {
+            let note_text = match degens {
                 1 => "(output collapsed into repetition and was cut — retry)".to_string(),
                 2 => "(collapsed again — reply with ONE short command only, e.g. `X dir`)".to_string(),
                 n => format!("(repetition collapse #{n} — emit a single tiny command, nothing else)"),
             };
-            ctl.emit(Ev::Result(depth, note.clone()));
-            ledger.push(Kind::Result, turn, note, None);
+            note(ledger, &ctl, depth, turn, note_text);
             // Complete commands parsed before the collapse still execute below,
             // but a D is dropped — its message may be full of the spam tail.
             cmds.retain(|c| !matches!(c, Cmd::Done { .. }));
@@ -306,8 +301,7 @@ pub fn run_session(
                         }
                         Err(e) => format!("err: {e}"),
                     };
-                    ctl.emit(Ev::Result(depth, result.clone()));
-                    ledger.push(Kind::Result, turn, result, None);
+                    note(ledger, &ctl, depth, turn, result);
                 }
                 Cmd::Agent { profile, task } => {
                     if depth >= 2 {
@@ -324,14 +318,12 @@ pub fn run_session(
                     let norm = |s: &str| s.trim_matches('"').trim().to_ascii_lowercase();
                     if pending.iter().any(|(p, t, _)| *p == profile && norm(t) == norm(&task)) {
                         let msg = format!("({profile} is ALREADY RUNNING on that task — its brief arrives in a later turn; do not spawn it again)");
-                        ctl.emit(Ev::Result(depth, msg.clone()));
-                        ledger.push(Kind::Result, turn, msg, None);
+                        note(ledger, &ctl, depth, turn, msg);
                         continue;
                     }
                     if pending.len() >= MAX_CONCURRENT_SUBAGENTS {
                         let msg = format!("(subagent limit: {} already running — wait for their briefs)", pending.len());
-                        ctl.emit(Ev::Result(depth, msg.clone()));
-                        ledger.push(Kind::Result, turn, msg, None);
+                        note(ledger, &ctl, depth, turn, msg);
                         continue;
                     }
                     ledger.push(Kind::Action, turn, format!("A {profile} {task}"), None);
@@ -339,8 +331,7 @@ pub fn run_session(
                     // Immediate acknowledgment, so the next turn's context
                     // proves the spawn happened and nothing needs repeating.
                     let ack = format!("({profile} started in background — its [{profile}] brief will arrive in a later turn)");
-                    ctl.emit(Ev::Result(depth, ack.clone()));
-                    ledger.push(Kind::Result, turn, ack, None);
+                    note(ledger, &ctl, depth, turn, ack);
                     let cfg2 = Arc::clone(&cfg);
                     let root2 = root.clone();
                     let p2 = profile.clone();
@@ -356,8 +347,7 @@ pub fn run_session(
                     let key = crate::ledger::fnv(&format!("{other:?}"));
                     if repeats.get(&key).is_some_and(|(n, _)| *n >= 5) {
                         let msg = "(refused: this exact command has repeated 5+ times with the same result — do something DIFFERENT, or answer with D)";
-                        ctl.emit(Ev::Result(depth, msg.into()));
-                        ledger.push(Kind::Result, turn, msg.into(), None);
+                        note(ledger, &ctl, depth, turn, msg.into());
                         continue;
                     }
                     exec_one(other, ws, ledger, &cfg, &client, task, turn, &ctx_cfg, &ctl, depth);
@@ -370,8 +360,7 @@ pub fn run_session(
                     }
                     if e.0 == 3 {
                         let msg = "(note: that command has now given the identical result 3 times — running it again will not help; change approach)";
-                        ctl.emit(Ev::Result(depth, msg.into()));
-                        ledger.push(Kind::Result, turn, msg.into(), None);
+                        note(ledger, &ctl, depth, turn, msg.into());
                     }
                 }
             }
@@ -379,9 +368,7 @@ pub fn run_session(
         rep.tool_ms += t_tools.elapsed().as_millis();
 
         if length_capped {
-            let note = "(your output hit the max_tokens limit mid-message — any cut-off file was written PARTIALLY. Read it, then CONTINUE it with I <id> <last-line> or E; do NOT rewrite it from scratch)";
-            ctl.emit(Ev::Result(depth, note.into()));
-            ledger.push(Kind::Result, turn, note.into(), None);
+            note(ledger, &ctl, depth, turn, "(your output hit the max_tokens limit mid-message — any cut-off file was written PARTIALLY. Read it, then CONTINUE it with I <id> <last-line> or E; do NOT rewrite it from scratch)".into());
         }
 
         if let Some(msg) = done {
@@ -396,9 +383,7 @@ pub fn run_session(
                     let sub = h.join().unwrap_or_default();
                     harvest(&name, sub, ledger, &ctl, depth, turn, &mut rep);
                 }
-                let note = "(all subagents have returned — incorporate their briefs above, then finish with D)";
-                ctl.emit(Ev::Result(depth, note.into()));
-                ledger.push(Kind::Result, turn, note.into(), None);
+                note(ledger, &ctl, depth, turn, "(all subagents have returned — incorporate their briefs above, then finish with D)".into());
                 continue;
             }
             let msg = clean_final(&msg);
@@ -521,81 +506,45 @@ fn exec_one(
 ) {
     // Announce BEFORE executing: a slow tool must show up in the status bar
     // while it runs, not after it finishes.
-    ctl.emit(Ev::Action(depth, crate::tools::clip(&action_of(&cmd), 200)));
-    let (action, result, file) = match cmd {
+    let action = action_of(&cmd);
+    ctl.emit(Ev::Action(depth, crate::tools::clip(&action, 200)));
+    let flat = |r: Result<String, String>| r.unwrap_or_else(|e| format!("err: {e}"));
+    let mut file: Option<u32> = None;
+    let result = match cmd {
         Cmd::Read { target, range } => {
-            let a = match range {
-                Some((x, y)) => format!("R {target} {x}:{y}"),
-                None => format!("R {target}"),
-            };
-            match ws.read(&target, range) {
-                Ok(r) => {
-                    let fid = r.strip_prefix('#').and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok());
-                    (a, r, fid)
+            let r = flat(ws.read(&target, range));
+            file = r.strip_prefix('#').and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok());
+            r
+        }
+        Cmd::Edit { target, a, b, body } => flat(ws.edit(&target, a, b, &body)),
+        Cmd::Insert { target, after, body } => flat(ws.insert(&target, after, &body)),
+        Cmd::New { path, body } => flat(ws.new_file(&path, &body)),
+        Cmd::Grep { pat, target } => flat(ws.grep(&pat, target.as_deref())),
+        Cmd::Exec { line } => run_shell(&line, &ws.root, DEFAULT_TOOL_TIMEOUT_MS, &cfg.exec.shell),
+        Cmd::Custom { verb, args } => match cfg.tool.get(&verb.to_string()) {
+            Some(t) => {
+                let line = t.cmd.replace("{args}", &args);
+                let raw = run_shell(&line, &ws.root, t.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS), &cfg.exec.shell);
+                let spec = t.prune.as_deref().unwrap_or("");
+                if spec.split('|').any(|s| s.trim() == "distill") {
+                    distill(client, cfg, task, &prune(spec, &raw))
+                } else {
+                    prune(spec, &raw)
                 }
-                Err(e) => (a, format!("err: {e}"), None),
             }
-        }
-        Cmd::Edit { target, a, b, body } => {
-            let act = format!("E {target} {a}:{b} (+{} lines)", body.lines().count());
-            match ws.edit(&target, a, b, &body) {
-                Ok(r) => (act, r, None),
-                Err(e) => (act, format!("err: {e}"), None),
-            }
-        }
-        Cmd::Insert { target, after, body } => {
-            let act = format!("I {target} {after} (+{} lines)", body.lines().count());
-            match ws.insert(&target, after, &body) {
-                Ok(r) => (act, r, None),
-                Err(e) => (act, format!("err: {e}"), None),
-            }
-        }
-        Cmd::New { path, body } => {
-            let act = format!("N {path} (+{} lines)", body.lines().count());
-            match ws.new_file(&path, &body) {
-                Ok(r) => (act, r, None),
-                Err(e) => (act, format!("err: {e}"), None),
-            }
-        }
-        Cmd::Grep { pat, target } => {
-            let act = match &target {
-                Some(t) => format!("G \"{pat}\" {t}"),
-                None => format!("G \"{pat}\""),
-            };
-            match ws.grep(&pat, target.as_deref()) {
-                Ok(r) => (act, r, None),
-                Err(e) => (act, format!("err: {e}"), None),
-            }
-        }
-        Cmd::Exec { line } => {
-            let act = format!("X {line}");
-            let r = run_shell(&line, &ws.root, DEFAULT_TOOL_TIMEOUT_MS, &cfg.exec.shell);
-            (act, r, None)
-        }
-        Cmd::Custom { verb, args } => {
-            let key = verb.to_string();
-            let act = format!("{verb} {args}");
-            match cfg.tool.get(&key) {
-                Some(t) => {
-                    let line = t.cmd.replace("{args}", &args);
-                    let raw = run_shell(&line, &ws.root, t.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS), &cfg.exec.shell);
-                    let spec = t.prune.as_deref().unwrap_or("");
-                    let pruned = if spec.split('|').any(|s| s.trim() == "distill") {
-                        distill(client, cfg, task, &prune(spec, &raw))
-                    } else {
-                        prune(spec, &raw)
-                    };
-                    (act, pruned, None)
-                }
-                None => (act, format!("err: unknown verb {verb}"), None),
-            }
-        }
+            None => format!("err: unknown verb {verb}"),
+        },
         Cmd::Agent { .. } | Cmd::Done { .. } | Cmd::View { .. } | Cmd::Say { .. } => unreachable!("handled by caller"),
     };
     ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&result, 3), 400)));
     ledger.push(Kind::Action, turn, action, None);
-    let result = cap(result, ctx.result_cap_chars);
-    ledger.push(Kind::Result, turn, result, file);
+    ledger.push(Kind::Result, turn, cap(result, ctx.result_cap_chars), file);
+}
+
+/// Emit + record an advisory line (loop-breaker notes, spawn acks, errors…).
+fn note(ledger: &mut Ledger, ctl: &Ctl, depth: u8, turn: u32, text: String) {
+    ctl.emit(Ev::Result(depth, crate::tools::clip(&text, 400)));
+    ledger.push(Kind::Result, turn, text, None);
 }
 
 fn distill(client: &Client, cfg: &Config, task: &str, text: &str) -> String {
