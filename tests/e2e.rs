@@ -334,11 +334,34 @@ fn duplicate_subagent_spawns_are_refused() {
 
 #[test]
 fn degenerate_spam_is_cut_and_retried() {
-    let spam: &'static str = Box::leak(format!("R greet.txt\n{}", "!".repeat(300)).into_boxed_str());
+    let spam: &'static str = Box::leak(format!("R greet.txt\n{}", "!".repeat(600)).into_boxed_str());
     let port = mock_server(vec![spam, "D recovered\n"]);
     let root = temp_repo();
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "task", None, 0, haste::agent::Ctl::default());
     assert_eq!(rep.final_msg, "recovered");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn ascii_art_survives_the_degeneration_guard() {
+    // 120 dashes = a markdown table rule / box border. Must NOT trip the guard.
+    let art: &'static str = Box::leak(format!("D here is the diagram\n{}\nstate machine\n{}\n", "-".repeat(120), "-".repeat(120)).into_boxed_str());
+    let port = mock_server(vec![art]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "draw it", None, 0, haste::agent::Ctl::default());
+    assert!(rep.final_msg.contains("state machine"), "art was cut: {}", rep.final_msg);
+    assert_eq!(rep.turns, 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn endless_collapse_aborts_with_explanation() {
+    let spam: &'static str = Box::leak("!".repeat(600).into_boxed_str());
+    let port = mock_server(vec![spam, spam, spam, spam, spam, spam, spam, spam]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "task", None, 0, haste::agent::Ctl::default());
+    assert!(rep.final_msg.contains("collapsed 6 times"), "{}", rep.final_msg);
+    assert!(rep.turns <= 7);
     let _ = std::fs::remove_dir_all(root);
 }
 

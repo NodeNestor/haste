@@ -116,7 +116,10 @@ impl Client {
                         if c == prev2 { pair_run += 1 } else { pair_run = 1 }
                         prev2 = last;
                         last = c;
-                        if run >= 80 || pair_run >= 160 {
+                        // Thresholds must clear legitimate ASCII art: markdown
+                        // tables and box diagrams run 80-150 identical chars,
+                        // while true repetition collapse runs to max_tokens.
+                        if run >= 240 || pair_run >= 480 {
                             degenerate = true;
                             finish_reason = Some("degenerate".into());
                             break 'outer;

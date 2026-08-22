@@ -247,6 +247,13 @@ pub fn run_session(
             // Complete commands parsed before the collapse still execute below,
             // but a D is dropped — its message may be full of the spam tail.
             cmds.retain(|c| !matches!(c, Cmd::Done { .. }));
+            // A stuck model produces the same collapse forever — stop burning
+            // turns and tell the user instead of retrying unboundedly.
+            if degens >= 6 {
+                rep.final_msg =
+                    "(aborted: output collapsed 6 times in a row — the model is stuck on this prompt; rephrase or try again)".into();
+                break;
+            }
             // A spam-only turn retries without counting toward the empty-turn abort.
             if cmds.is_empty() {
                 continue;
