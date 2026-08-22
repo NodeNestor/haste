@@ -169,7 +169,7 @@ fn event_stream_feeds_a_ui() {
     ]);
     let root = temp_repo();
     let (tx, rx) = std::sync::mpsc::channel();
-    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None };
+    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None, inbox: None };
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "look at greet.txt", None, 0, ctl);
     assert_eq!(rep.final_msg, "looked");
     let evs: Vec<haste::agent::Ev> = rx.try_iter().collect();
@@ -254,6 +254,33 @@ fn length_cap_writes_partial_and_tells_model_to_continue() {
     );
     let page = std::fs::read_to_string(root.join("page.html")).unwrap();
     assert_eq!(page, "<!DOCTYPE html>\n<body>\n</body>\n");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn degenerate_spam_is_cut_and_retried() {
+    let spam: &'static str = Box::leak(format!("R greet.txt\n{}", "!".repeat(300)).into_boxed_str());
+    let port = mock_server(vec![spam, "D recovered\n"]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "task", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "recovered");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn midrun_inbox_message_lands_in_ledger() {
+    let port = mock_server(vec!["X echo one\n", "D ok\n"]);
+    let root = temp_repo();
+    let cfg = Arc::new(cfg_for(port));
+    let inbox = std::sync::Arc::new(std::sync::Mutex::new(vec!["also check the docs folder".to_string()]));
+    let ctl = haste::agent::Ctl { sink: None, stop: None, inbox: Some(inbox) };
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "main task", None, 0, ctl);
+    assert_eq!(rep.final_msg, "ok");
+    assert!(
+        session.ledger.entries.iter().any(|e| e.text == "also check the docs folder"),
+        "steering message missing from ledger"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -27,6 +27,9 @@ pub enum Ev {
 pub struct Ctl {
     pub sink: Option<std::sync::mpsc::Sender<Ev>>,
     pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Messages the user sends mid-run; drained into the ledger at the top of
+    /// each top-level turn, so you can steer the leader while it works.
+    pub inbox: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 impl Ctl {
@@ -142,6 +145,16 @@ pub fn run_session(
         rep.turns = i;
         ctl.emit(Ev::Turn(i));
 
+        // Mid-run steering: user messages land as fresh task lines.
+        if depth == 0 {
+            if let Some(inbox) = &ctl.inbox {
+                let msgs: Vec<String> = std::mem::take(&mut *inbox.lock().unwrap());
+                for m in msgs {
+                    ledger.push(Kind::Task, turn, m, None);
+                }
+            }
+        }
+
         // Harvest any subagents that finished while we were working — their
         // briefs enter the context now, without ever having blocked a turn.
         let mut k = 0;
@@ -197,12 +210,14 @@ pub fn run_session(
             lexer.feed(delta, &mut cmds);
         });
         let mut length_capped = false;
+        let mut degenerated = false;
         match stream_res {
             Ok(s) => {
                 rep.model_ms += s.total_ms;
                 rep.ttft_ms_sum += s.ttft_ms;
                 rep.out_chars += s.out_chars;
                 length_capped = s.finish_reason.as_deref() == Some("length");
+                degenerated = s.finish_reason.as_deref() == Some("degenerate");
             }
             Err(e) => {
                 let msg = format!("model error: {e}");
@@ -213,6 +228,19 @@ pub fn run_session(
             }
         }
         lexer.finish(&mut cmds);
+
+        if degenerated {
+            let note = "(that output degenerated into character spam and was cut off — take a breath and try again with a normal command)";
+            ctl.emit(Ev::Result(depth, note.into()));
+            ledger.push(Kind::Result, turn, note.into(), None);
+            // Complete commands parsed before the collapse still execute below,
+            // but a D is dropped — its message may be full of the spam tail.
+            cmds.retain(|c| !matches!(c, Cmd::Done { .. }));
+            // A spam-only turn retries without counting toward the empty-turn abort.
+            if cmds.is_empty() {
+                continue;
+            }
+        }
 
         if cmds.is_empty() {
             empty_turns += 1;

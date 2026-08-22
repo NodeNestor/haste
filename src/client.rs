@@ -75,8 +75,14 @@ impl Client {
         let mut ttft: Option<u128> = None;
         let mut out_chars = 0usize;
         let mut finish_reason: Option<String> = None;
+        // Degeneration guard: quantized models sometimes collapse into "!!!!"
+        // or alternating-pair spam. Detect the runaway in-stream, drop the
+        // connection, and report it — a retry costs less than a ruined turn.
+        let (mut last, mut run) = ('\0', 0u32);
+        let (mut prev2, mut pair_run) = ('\0', 0u32);
+        let mut degenerate = false;
         let reader = BufReader::new(resp.into_reader());
-        for line in reader.lines() {
+        'outer: for line in reader.lines() {
             let line = line.map_err(|e| format!("stream read: {e}"))?;
             let Some(data) = line.strip_prefix("data: ") else { continue };
             if data.trim() == "[DONE]" {
@@ -90,10 +96,22 @@ impl Client {
                 if !delta.is_empty() {
                     ttft.get_or_insert_with(|| t0.elapsed().as_millis());
                     out_chars += delta.len();
+                    for c in delta.chars() {
+                        if c == last { run += 1 } else { run = 1 }
+                        if c == prev2 { pair_run += 1 } else { pair_run = 1 }
+                        prev2 = last;
+                        last = c;
+                        if run >= 80 || pair_run >= 160 {
+                            degenerate = true;
+                            finish_reason = Some("degenerate".into());
+                            break 'outer;
+                        }
+                    }
                     on_delta(delta);
                 }
             }
         }
+        let _ = degenerate;
         Ok(StreamStats {
             ttft_ms: ttft.unwrap_or_else(|| t0.elapsed().as_millis()),
             total_ms: t0.elapsed().as_millis(),

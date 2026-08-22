@@ -13,7 +13,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const LOG_CAP: usize = 4000;
@@ -38,6 +38,7 @@ struct App {
     sess_rx: Option<Receiver<Session>>,
     session: Option<Session>,
     stop: Option<Arc<AtomicBool>>,
+    inbox: Option<Arc<Mutex<Vec<String>>>>,
     quit: bool,
 }
 
@@ -81,6 +82,7 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
         sess_rx: None,
         session: None,
         stop: None,
+        inbox: None,
         quit: false,
     };
     let mut dirty = true;
@@ -166,6 +168,7 @@ fn finish_run(app: &mut App, msg: String) {
     app.last_action.clear();
     app.rx = None;
     app.stop = None;
+    app.inbox = None;
     // Take the continued session back from the worker thread.
     if let Some(rx) = app.sess_rx.take() {
         if let Ok(s) = rx.recv_timeout(Duration::from_secs(2)) {
@@ -230,16 +233,24 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
         return;
     }
     if app.running {
-        app.push(DIM, "  (a run is active — Esc to stop it first)".into());
+        // Talk to the leader mid-run: the message lands in its context at the
+        // top of its next turn.
+        if let Some(inbox) = &app.inbox {
+            inbox.lock().unwrap().push(line.clone());
+            app.push(USER, format!("> {line}"));
+            app.push(DIM, "  (delivered to the agent — lands next turn)".into());
+        }
         return;
     }
     app.push(USER, format!("> {line}"));
     let (tx, rx) = std::sync::mpsc::channel();
     let (sess_tx, sess_rx) = std::sync::mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
+    let inbox = Arc::new(Mutex::new(Vec::new()));
     app.rx = Some(rx);
     app.sess_rx = Some(sess_rx);
     app.stop = Some(stop.clone());
+    app.inbox = Some(inbox.clone());
     app.running = true;
     app.turn = 0;
     app.started = Some(Instant::now());
@@ -249,7 +260,14 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
         .take()
         .unwrap_or_else(|| Session::new(cfg, app.root.clone(), 0));
     std::thread::spawn(move || {
-        agent::run_session(cfg2, &mut session, &line, None, 0, Ctl { sink: Some(tx), stop: Some(stop) });
+        agent::run_session(
+            cfg2,
+            &mut session,
+            &line,
+            None,
+            0,
+            Ctl { sink: Some(tx), stop: Some(stop), inbox: Some(inbox) },
+        );
         let _ = sess_tx.send(session);
     });
 }
