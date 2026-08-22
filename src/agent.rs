@@ -126,6 +126,7 @@ pub fn run_session(
     let mut rep = Report::default();
     let mut empty_turns = 0u32;
     let mut degens = 0u32;
+    let mut refusals = 0u32;
     // Images queued by V: attached to exactly the next request, then dropped —
     // the model sees them once and can V again if it needs another look.
     let mut images: Vec<(String, String)> = Vec::new();
@@ -390,6 +391,7 @@ pub fn run_session(
                 other => {
                     let key = crate::ledger::fnv(&format!("{other:?}"));
                     if repeats.get(&key).is_some_and(|(n, _)| *n >= 5) {
+                        refusals += 1;
                         let msg = "(refused: this exact command has repeated 5+ times with the same result — do something DIFFERENT, or answer with D)";
                         note(ledger, &ctl, depth, turn, msg.into());
                         continue;
@@ -410,6 +412,15 @@ pub fn run_session(
             }
         }
         rep.tool_ms += t_tools.elapsed().as_millis();
+
+        // A model that ignores refusals and re-sends the same command forever
+        // (deterministic samplers have no variance to escape with) must not
+        // burn unlimited turns.
+        if refusals >= 12 {
+            rep.final_msg =
+                "(aborted: the model kept repeating a refused command — it is stuck; rephrase the task or use a different model)".into();
+            break;
+        }
 
         if length_capped {
             note(ledger, &ctl, depth, turn, "(your output hit the max_tokens limit mid-message — any cut-off file was written PARTIALLY. Read it, then CONTINUE it with I <id> <last-line> or E; do NOT rewrite it from scratch)".into());

@@ -461,6 +461,24 @@ fn phrase_loops_are_cut_like_char_spam() {
 }
 
 #[test]
+fn endless_refusal_loop_aborts() {
+    // A deterministic model re-sending one refused command forever.
+    let same: &'static str = "G \"wrold\" greet.txt\n";
+    let mut scripts = vec![same; 30];
+    scripts.push("D never reached\n");
+    let port = mock_server(scripts);
+    let root = temp_repo();
+    let toml = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\n[context]\nmax_turns = 0\nbootstrap = false\n"
+    );
+    let cfg: Config = toml::from_str(&toml).unwrap();
+    let rep = haste::agent::run(Arc::new(cfg), root.clone(), "loop", None, 0, haste::agent::Ctl::default());
+    assert!(rep.final_msg.contains("kept repeating"), "{}", rep.final_msg);
+    assert!(rep.turns < 25, "ran {} turns", rep.turns);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn endless_collapse_aborts_with_explanation() {
     let spam: &'static str = Box::leak("!".repeat(600).into_boxed_str());
     let port = mock_server(vec![spam, spam, spam, spam, spam, spam, spam, spam]);
