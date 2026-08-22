@@ -330,9 +330,11 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
     // Live stream pane.
     if stream_h > 0 {
         let div_row = log_h as u16;
-        let title = format!("── agent stream (F2 hides) {}", "─".repeat(w.saturating_sub(28)));
+        // Build to exact column width — never byte-slice multi-byte dashes.
+        let title = format!("── agent stream (F2 hides) {}", "─".repeat(w.saturating_sub(28).max(1)));
+        let title: String = title.chars().take(w).collect();
         queue!(out, cursor::MoveTo(0, div_row))?;
-        styled_print(out, DIM, &title[..title.len().min(w)])?;
+        styled_print(out, DIM, &title)?;
         let mut lines: Vec<(u8, String)> = Vec::new();
         for l in app.live.lines() {
             wrap_into(&mut lines, DIM, l, w.saturating_sub(1));
@@ -362,13 +364,17 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
         state,
         if app.stream_on { "on" } else { "off" }
     );
-    let mut bar = status;
-    bar.truncate(w);
+    let bar: String = status.chars().take(w).collect();
     queue!(out, cursor::MoveTo(0, (h - 2) as u16), SetAttribute(Attribute::Reverse), Print(format!("{bar:<w$}")), SetAttribute(Attribute::Reset))?;
 
     // Input line.
     let prompt = format!("> {}", app.input);
-    let shown: String = if prompt.len() >= w { prompt[prompt.len() - w + 1..].to_string() } else { prompt };
+    let nch = prompt.chars().count();
+    let shown: String = if nch >= w {
+        prompt.chars().skip(nch - w + 1).collect()
+    } else {
+        prompt
+    };
     queue!(out, cursor::MoveTo(0, (h - 1) as u16), Print(&shown))?;
     out.flush()
 }
