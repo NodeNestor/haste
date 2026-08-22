@@ -43,7 +43,7 @@ struct App {
 
 impl App {
     fn push(&mut self, kind: u8, line: String) {
-        self.log.push((kind, line));
+        self.log.push((kind, crate::tools::clip(&line, 600)));
         if self.log.len() > LOG_CAP {
             self.log.drain(..self.log.len() - LOG_CAP);
         }

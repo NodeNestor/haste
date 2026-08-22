@@ -4,6 +4,43 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 const GREP_MAX_HITS: usize = 50;
+const GREP_LINE_WINDOW: usize = 200;
+const READ_LINE_MAX: usize = 500;
+
+/// UTF-8-boundary-safe truncation with an ellipsis note. The naive
+/// String::truncate panics mid-codepoint.
+pub fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    format!("{}…(+{}ch)", &s[..i], s.len() - i)
+}
+
+/// A window of `s` around byte range [lo, hi), boundary-safe, for showing
+/// grep matches inside minified single-line files.
+fn window(s: &str, lo: usize, hi: usize, before: usize, after: usize) -> String {
+    let mut start = lo.saturating_sub(before);
+    while start > 0 && !s.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (hi + after).min(s.len());
+    while end < s.len() && !s.is_char_boundary(end) {
+        end += 1;
+    }
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(&s[start..end]);
+    if end < s.len() {
+        out.push('…');
+    }
+    out
+}
 pub const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".haste", "__pycache__", "dist", ".venv"];
 
 /// The workspace: root dir + the file intern table. Paths are token sinks, so
@@ -58,7 +95,7 @@ impl Workspace {
         }
         let mut out = format!("#{id} {} {}:{} of {}\n", self.files[id as usize].display(), a, b, lines.len());
         for (i, l) in lines.iter().enumerate().take(b).skip(a - 1) {
-            out.push_str(&format!("{}:{}\n", i + 1, l));
+            out.push_str(&format!("{}:{}\n", i + 1, clip(l, READ_LINE_MAX)));
         }
         out.pop();
         Ok(out)
@@ -138,12 +175,19 @@ impl Workspace {
             } else if let Ok(text) = std::fs::read_to_string(&p) {
                 let mut id: Option<u32> = None;
                 for (i, line) in text.lines().enumerate() {
-                    if re.is_match(line) {
+                    if let Some(m) = re.find(line) {
                         let id = *id.get_or_insert_with(|| {
                             let rel = p.strip_prefix(&self.root).unwrap_or(&p).to_path_buf();
                             self.intern(&rel)
                         });
-                        hits.push(format!("#{id}:{}:{}", i + 1, line.trim()));
+                        // Minified files have megabyte lines: show a window
+                        // around the match, never the raw line.
+                        let shown = if line.len() > GREP_LINE_WINDOW {
+                            window(line, m.start(), m.end(), 40, 120)
+                        } else {
+                            line.trim().to_string()
+                        };
+                        hits.push(format!("#{id}:{}:{}", i + 1, shown));
                         if hits.len() >= GREP_MAX_HITS {
                             break;
                         }
@@ -406,6 +450,28 @@ mod tests {
         let hits = w.grep("thr", None).unwrap();
         assert!(hits.contains("#0:3:three"), "{hits}");
         assert!(w.legend().contains("#0=a.txt"));
+    }
+
+    #[test]
+    fn clip_is_boundary_safe_and_grep_windows_megalines() {
+        // clip must not panic mid-codepoint
+        let s = "ααααααααα"; // 2 bytes each
+        let c = clip(s, 5);
+        assert!(c.starts_with("αα") && c.contains("…(+"), "{c}");
+
+        // grep on a minified single-line file returns a window, not the line
+        let td = tempdir::TempDir::new();
+        let big = format!("{}\"caption\":true{}", "x".repeat(50_000), "y".repeat(50_000));
+        std::fs::write(td.path().join("mini.json"), &big).unwrap();
+        let mut w = Workspace::new(td.path().to_path_buf());
+        let hits = w.grep("caption", None).unwrap();
+        assert!(hits.len() < 500, "grep hit not windowed: {} chars", hits.len());
+        assert!(hits.contains("\"caption\":true"), "{hits}");
+        assert!(hits.contains('…'), "{hits}");
+
+        // reads clamp absurd lines too
+        let r = w.read("mini.json", None).unwrap();
+        assert!(r.len() < 1200, "read not clamped: {} chars", r.len());
     }
 
     #[test]

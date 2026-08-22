@@ -388,8 +388,8 @@ fn exec_one(
         }
         Cmd::Agent { .. } | Cmd::Done { .. } => unreachable!("handled by caller"),
     };
-    ctl.emit(Ev::Action(depth, action.clone()));
-    ctl.emit(Ev::Result(depth, first_lines(&result, 3)));
+    ctl.emit(Ev::Action(depth, crate::tools::clip(&action, 200)));
+    ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&result, 3), 400)));
     ledger.push(Kind::Action, turn, action, None);
     let result = cap(result, ctx.result_cap_chars);
     ledger.push(Kind::Result, turn, result, file);
@@ -406,12 +406,13 @@ fn distill(client: &Client, cfg: &Config, task: &str, text: &str) -> String {
     }
 }
 
-fn cap(mut s: String, max: usize) -> String {
+fn cap(s: String, max: usize) -> String {
     if s.len() > max {
-        s.truncate(max);
-        s.push_str("\n…(result capped)");
+        // clip is UTF-8-boundary safe; String::truncate would panic mid-char.
+        format!("{}\n…(result capped)", crate::tools::clip(&s, max))
+    } else {
+        s
     }
-    s
 }
 
 fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str>) -> String {
