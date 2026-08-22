@@ -333,12 +333,37 @@ pub fn run_shell(line: &str, cwd: &Path, timeout_ms: u64, shell: &str) -> String
         }
         text.push_str(&err);
     }
-    let text = text.trim_end();
+    // Collapse column-alignment padding (PowerShell tables etc.): runs of
+    // whitespace are token waste AND a repetition attractor that tips
+    // quantized models into degeneration when they sit at the context tail.
+    let text = squeeze_spaces(text.trim_end());
     if code == 0 {
         if text.is_empty() { "ok".into() } else { format!("ok\n{text}") }
     } else {
         format!("exit {code}\n{text}")
     }
+}
+
+fn squeeze_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for (li, line) in s.lines().enumerate() {
+        if li > 0 {
+            out.push('\n');
+        }
+        let mut run = 0;
+        for c in line.trim_end().chars() {
+            if c == ' ' || c == '\t' {
+                run += 1;
+                if run <= 2 {
+                    out.push(' ');
+                }
+            } else {
+                run = 0;
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 /// Structural pruners. Spec: name[:args], chained with '|'.
@@ -512,6 +537,14 @@ mod tests {
         assert!(ff.starts_with("error[E0308]"));
         let chain = prune("drop:^note|first_failure", failing);
         assert!(!chain.contains("note:"));
+    }
+
+    #[test]
+    fn shell_output_squeezes_alignment_padding() {
+        let sh = crate::config::ExecCfg::default().shell;
+        let r = run_shell("echo \"Name                     LastWriteTime\"", &std::env::temp_dir(), 15000, &sh);
+        assert!(r.contains("Name  LastWriteTime"), "{r}");
+        assert!(!r.contains("    "), "padding survived: {r}");
     }
 
     #[test]

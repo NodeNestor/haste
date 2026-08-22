@@ -119,6 +119,7 @@ pub fn run_session(
 
     let mut rep = Report::default();
     let mut empty_turns = 0u32;
+    let mut degens = 0u32;
     let base = session.turn_base;
     // Background subagents: spawned here, never blocking a turn. Finished ones
     // are harvested at the top of each turn; D waits for stragglers.
@@ -232,9 +233,16 @@ pub fn run_session(
         lexer.finish(&mut cmds);
 
         if degenerated {
-            let note = "(that output degenerated into character spam and was cut off — take a breath and try again with a normal command)";
-            ctl.emit(Ev::Result(depth, note.into()));
-            ledger.push(Kind::Result, turn, note.into(), None);
+            degens += 1;
+            // Every note is unique text: stacking IDENTICAL lines was itself a
+            // repetition attractor that made the next collapse more likely.
+            let note = match degens {
+                1 => "(output collapsed into repetition and was cut — retry)".to_string(),
+                2 => "(collapsed again — reply with ONE short command only, e.g. `X dir`)".to_string(),
+                n => format!("(repetition collapse #{n} — emit a single tiny command, nothing else)"),
+            };
+            ctl.emit(Ev::Result(depth, note.clone()));
+            ledger.push(Kind::Result, turn, note, None);
             // Complete commands parsed before the collapse still execute below,
             // but a D is dropped — its message may be full of the spam tail.
             cmds.retain(|c| !matches!(c, Cmd::Done { .. }));
@@ -242,6 +250,8 @@ pub fn run_session(
             if cmds.is_empty() {
                 continue;
             }
+        } else {
+            degens = 0;
         }
 
         if cmds.is_empty() {
