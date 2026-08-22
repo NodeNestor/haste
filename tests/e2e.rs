@@ -183,6 +183,24 @@ fn event_stream_feeds_a_ui() {
 }
 
 #[test]
+fn continued_session_shares_ledger() {
+    let port = mock_server(vec!["D one\n", "D two\n"]);
+    let root = temp_repo();
+    let cfg = Arc::new(cfg_for(port));
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let r1 = haste::agent::run_session(Arc::clone(&cfg), &mut session, "first", None, 0, haste::agent::Ctl::default());
+    let r2 = haste::agent::run_session(Arc::clone(&cfg), &mut session, "second", None, 0, haste::agent::Ctl::default());
+    assert_eq!(r1.final_msg, "one");
+    assert_eq!(r2.final_msg, "two");
+    let tasks = session.ledger.entries.iter().filter(|e| matches!(e.kind, Kind::Task)).count();
+    let finals = session.ledger.entries.iter().filter(|e| matches!(e.kind, Kind::Final)).count();
+    assert_eq!((tasks, finals), (2, 2), "one ledger must hold both tasks");
+    // Turn numbering continues across tasks so age-based folding stays sane.
+    assert_eq!(session.ledger.entries.last().unwrap().turn, 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn renderer_stress_huge_ledger() {
     // 10k entries, ~5MB of raw ledger text â€” a long session far past any budget.
     let mut ledger = Ledger::new(None);

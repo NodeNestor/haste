@@ -1,8 +1,10 @@
-//! Split-screen TUI: top = session log (actions/results/reports), bottom =
-//! the live agent stream (raw model output as it generates, F2 toggles) plus
-//! status bar and input line. Headless mode never touches this module.
+//! Split-screen TUI, styled like a chat: your prompt echoed as "> ...", the
+//! agent's answer as plain text, all machinery (actions, results, stats)
+//! dimmed. One continuable Session per root, so follow-up prompts share the
+//! ledger and workspace — conversation memory. Bottom pane = live model
+//! stream (F2 toggles). Headless mode never touches this module.
 
-use crate::agent::{self, Ctl, Ev};
+use crate::agent::{self, Ctl, Ev, Session};
 use crate::config::Config;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{Attribute, Print, SetAttribute};
@@ -16,8 +18,13 @@ use std::time::{Duration, Instant};
 
 const LOG_CAP: usize = 4000;
 
+/// Line styles in the session log.
+const PLAIN: u8 = 0; // agent's answer
+const DIM: u8 = 1; // actions, results, stats, system notes
+const USER: u8 = 2; // the user's prompt
+
 struct App {
-    log: Vec<String>,
+    log: Vec<(u8, String)>,
     live: String,
     input: String,
     root: PathBuf,
@@ -27,13 +34,15 @@ struct App {
     turn: u32,
     started: Option<Instant>,
     rx: Option<Receiver<Ev>>,
+    sess_rx: Option<Receiver<Session>>,
+    session: Option<Session>,
     stop: Option<Arc<AtomicBool>>,
     quit: bool,
 }
 
 impl App {
-    fn push(&mut self, line: String) {
-        self.log.push(line);
+    fn push(&mut self, kind: u8, line: String) {
+        self.log.push((kind, line));
         if self.log.len() > LOG_CAP {
             self.log.drain(..self.log.len() - LOG_CAP);
         }
@@ -54,9 +63,9 @@ pub fn run(cfg: Arc<Config>, root: PathBuf) -> io::Result<()> {
 fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Result<()> {
     let mut app = App {
         log: vec![
-            format!("haste — {} @ {}", cfg.model.model, cfg.model.base_url),
-            "type a task and press Enter · :cd <path> · F2 stream pane · Esc stop · :q quit".into(),
-            String::new(),
+            (DIM, format!("haste · {} · {}", cfg.model.model, root.display())),
+            (DIM, "Enter task · :cd <path> · F2 stream · Esc stop · :q quit".into()),
+            (DIM, String::new()),
         ],
         live: String::new(),
         input: String::new(),
@@ -67,6 +76,8 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
         turn: 0,
         started: None,
         rx: None,
+        sess_rx: None,
+        session: None,
         stop: None,
         quit: false,
     };
@@ -85,7 +96,6 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
                 }
             }
         }
-        // tick the elapsed clock while running
         if app.running && last_tick.elapsed() > Duration::from_millis(250) {
             dirty = true;
         }
@@ -124,31 +134,40 @@ fn drain_events(app: &mut App) -> bool {
             Ev::Delta(d) => app.live.push_str(&d),
             Ev::Action(depth, a) => {
                 let pad = "  ".repeat(depth as usize);
-                app.push(format!("{pad}> {a}"));
+                app.push(DIM, format!("  {pad}· {a}"));
             }
             Ev::Result(depth, r) => {
                 let pad = "  ".repeat(depth as usize);
-                app.push(format!("{pad}  {r}"));
+                app.push(DIM, format!("  {pad}  {r}"));
             }
-            Ev::Report(r) => app.push(format!("-- {r}")),
+            Ev::Report(r) => app.push(DIM, format!("  {r}")),
             Ev::Done(msg) => {
-                for l in msg.lines() {
-                    app.push(format!("DONE: {l}"));
-                }
-                app.push(String::new());
-                app.running = false;
-                app.live.clear();
-                app.rx = None;
-                app.stop = None;
+                finish_run(app, msg);
                 return true;
             }
         }
     }
     if disconnected {
-        app.running = false;
-        app.rx = None;
+        finish_run(app, "(worker died)".into());
     }
     changed
+}
+
+fn finish_run(app: &mut App, msg: String) {
+    for l in msg.lines() {
+        app.push(PLAIN, l.to_string());
+    }
+    app.push(PLAIN, String::new());
+    app.running = false;
+    app.live.clear();
+    app.rx = None;
+    app.stop = None;
+    // Take the continued session back from the worker thread.
+    if let Some(rx) = app.sess_rx.take() {
+        if let Ok(s) = rx.recv_timeout(Duration::from_secs(2)) {
+            app.session = Some(s);
+        }
+    }
 }
 
 fn handle_key(app: &mut App, cfg: &Arc<Config>, k: KeyEvent) {
@@ -176,7 +195,7 @@ fn handle_key(app: &mut App, cfg: &Arc<Config>, k: KeyEvent) {
 fn request_stop(app: &mut App) {
     if let Some(s) = &app.stop {
         s.store(true, Ordering::Relaxed);
-        app.push("(stop requested — finishing current turn)".into());
+        app.push(DIM, "  (stopping after this turn)".into());
     }
 }
 
@@ -188,16 +207,17 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
     }
     if let Some(rest) = line.strip_prefix(":cd ") {
         if app.running {
-            app.push("(busy — :cd after the run finishes)".into());
+            app.push(DIM, "  (busy — :cd after the run finishes)".into());
             return;
         }
         let p = PathBuf::from(rest.trim());
         match p.canonicalize() {
             Ok(abs) if abs.is_dir() => {
-                app.push(format!("root -> {}", abs.display()));
+                app.push(DIM, format!("  root → {} (new session)", abs.display()));
                 app.root = abs;
+                app.session = None;
             }
-            _ => app.push(format!("no such directory: {rest}")),
+            _ => app.push(DIM, format!("  no such directory: {rest}")),
         }
         return;
     }
@@ -206,27 +226,33 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
         return;
     }
     if app.running {
-        app.push("(a run is active — Esc to stop it first)".into());
+        app.push(DIM, "  (a run is active — Esc to stop it first)".into());
         return;
     }
-    app.push(format!("TASK: {line}"));
+    app.push(USER, format!("> {line}"));
     let (tx, rx) = std::sync::mpsc::channel();
+    let (sess_tx, sess_rx) = std::sync::mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     app.rx = Some(rx);
+    app.sess_rx = Some(sess_rx);
     app.stop = Some(stop.clone());
     app.running = true;
     app.turn = 0;
     app.started = Some(Instant::now());
-    let cfg = Arc::clone(cfg);
-    let root = app.root.clone();
+    let cfg2 = Arc::clone(cfg);
+    let mut session = app
+        .session
+        .take()
+        .unwrap_or_else(|| Session::new(cfg, app.root.clone(), 0));
     std::thread::spawn(move || {
-        agent::run(cfg, root, &line, None, 0, Ctl { sink: Some(tx), stop: Some(stop) });
+        agent::run_session(cfg2, &mut session, &line, None, 0, Ctl { sink: Some(tx), stop: Some(stop) });
+        let _ = sess_tx.send(session);
     });
 }
 
-fn wrap_into<'a>(dst: &mut Vec<String>, line: &'a str, w: usize) {
+fn wrap_into(dst: &mut Vec<(u8, String)>, kind: u8, line: &str, w: usize) {
     if line.len() <= w {
-        dst.push(line.to_string());
+        dst.push((kind, line.to_string()));
         return;
     }
     let mut rest = line;
@@ -237,8 +263,16 @@ fn wrap_into<'a>(dst: &mut Vec<String>, line: &'a str, w: usize) {
             .last()
             .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(rest.len());
-        dst.push(rest[..cut].to_string());
+        dst.push((kind, rest[..cut].to_string()));
         rest = &rest[cut..];
+    }
+}
+
+fn styled_print(out: &mut impl Write, kind: u8, text: &str) -> io::Result<()> {
+    match kind {
+        DIM => queue!(out, SetAttribute(Attribute::Dim), Print(text), SetAttribute(Attribute::Reset)),
+        USER => queue!(out, SetAttribute(Attribute::Bold), Print(text), SetAttribute(Attribute::Reset)),
+        _ => queue!(out, Print(text)),
     }
 }
 
@@ -250,15 +284,14 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
     }
     queue!(out, terminal::Clear(terminal::ClearType::All), cursor::MoveTo(0, 0))?;
 
-    // Bottom-up budget: input line, status line, then optional stream pane.
     let stream_h = if app.stream_on { (h - 2) / 2 } else { 0 };
     let log_h = h - 2 - stream_h - if stream_h > 0 { 1 } else { 0 };
 
-    // Session log (top).
-    let mut wrapped: Vec<String> = Vec::new();
-    for l in app.log.iter().rev().take(log_h + app.scroll + 40) {
+    // Session log (top), bottom-anchored.
+    let mut wrapped: Vec<(u8, String)> = Vec::new();
+    for (kind, l) in app.log.iter().rev().take(log_h + app.scroll + 40) {
         let mut tmp = Vec::new();
-        wrap_into(&mut tmp, l, w.saturating_sub(1));
+        wrap_into(&mut tmp, *kind, l, w.saturating_sub(1));
         for t in tmp.into_iter().rev() {
             wrapped.push(t);
         }
@@ -266,39 +299,42 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
             break;
         }
     }
-    let visible: Vec<&String> = wrapped.iter().skip(app.scroll).take(log_h).collect();
-    for (row, line) in visible.iter().rev().enumerate() {
+    let visible: Vec<&(u8, String)> = wrapped.iter().skip(app.scroll).take(log_h).collect();
+    for (row, (kind, line)) in visible.iter().rev().enumerate() {
         let start = log_h.saturating_sub(visible.len());
-        queue!(out, cursor::MoveTo(0, (start + row) as u16), Print(line))?;
+        queue!(out, cursor::MoveTo(0, (start + row) as u16))?;
+        styled_print(out, *kind, line)?;
     }
 
-    // Stream pane (bottom half).
+    // Live stream pane.
     if stream_h > 0 {
         let div_row = log_h as u16;
         let title = format!("── agent stream (F2 hides) {}", "─".repeat(w.saturating_sub(28)));
-        queue!(out, cursor::MoveTo(0, div_row), SetAttribute(Attribute::Dim), Print(&title[..title.len().min(w)]), SetAttribute(Attribute::Reset))?;
-        let mut lines: Vec<String> = Vec::new();
+        queue!(out, cursor::MoveTo(0, div_row))?;
+        styled_print(out, DIM, &title[..title.len().min(w)])?;
+        let mut lines: Vec<(u8, String)> = Vec::new();
         for l in app.live.lines() {
-            wrap_into(&mut lines, l, w.saturating_sub(1));
+            wrap_into(&mut lines, DIM, l, w.saturating_sub(1));
         }
         let take = lines.len().saturating_sub(stream_h - 1);
-        for (i, l) in lines[take..].iter().enumerate() {
-            queue!(out, cursor::MoveTo(0, div_row + 1 + i as u16), SetAttribute(Attribute::Dim), Print(l), SetAttribute(Attribute::Reset))?;
+        for (i, (_, l)) in lines[take..].iter().enumerate() {
+            queue!(out, cursor::MoveTo(0, div_row + 1 + i as u16))?;
+            styled_print(out, DIM, l)?;
         }
     }
 
     // Status bar.
     let state = if app.running {
         let secs = app.started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
-        format!("RUNNING turn {} · {:.1}s", app.turn, secs)
+        format!("turn {} · {:.0}s", app.turn, secs)
     } else {
         "idle".into()
     };
     let status = format!(
-        " {} · {} · stream {} · Esc stop · :q quit ",
+        " {} · {} · stream {} ",
         app.root.display(),
         state,
-        if app.stream_on { "ON" } else { "off" }
+        if app.stream_on { "on" } else { "off" }
     );
     let mut bar = status;
     bar.truncate(w);

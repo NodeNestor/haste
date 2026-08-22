@@ -56,7 +56,46 @@ pub struct Report {
     pub commands: usize,
 }
 
+/// A continuable session: the ledger, workspace, and renderer survive across
+/// tasks so a TUI conversation has memory. Headless runs make one and drop it.
+pub struct Session {
+    pub ledger: Ledger,
+    pub ws: Workspace,
+    pub renderer: Renderer,
+    root: PathBuf,
+    turn_base: u32,
+}
+
+impl Session {
+    pub fn new(cfg: &Config, root: PathBuf, depth: u8) -> Session {
+        let tee = (depth == 0).then(|| root.join(".haste").join("ledger.jsonl"));
+        let mut ledger = Ledger::new(tee.as_deref());
+        if depth == 0 && cfg.context.bootstrap {
+            ledger.push(Kind::Pin, 0, crate::bootstrap::workspace_state(&root), None);
+        }
+        Session {
+            ledger,
+            ws: Workspace::new(root.clone()),
+            renderer: Renderer::new(),
+            root,
+            turn_base: 0,
+        }
+    }
+}
+
 pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, depth: u8, ctl: Ctl) -> Report {
+    let mut session = Session::new(&cfg, root, depth);
+    run_session(cfg, &mut session, task, profile, depth, ctl)
+}
+
+pub fn run_session(
+    cfg: Arc<Config>,
+    session: &mut Session,
+    task: &str,
+    profile: Option<&str>,
+    depth: u8,
+    ctl: Ctl,
+) -> Report {
     let t_start = Instant::now();
     let prof = profile.and_then(|p| cfg.profile.get(p));
     let (max_turns, budget) = match prof {
@@ -66,30 +105,31 @@ pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, d
     let mut ctx_cfg = cfg.context.clone();
     ctx_cfg.budget_tokens = budget;
 
-    let tee = (depth == 0).then(|| root.join(".haste").join("ledger.jsonl"));
-    let mut ledger = Ledger::new(tee.as_deref());
-    if depth == 0 && cfg.context.bootstrap {
-        ledger.push(Kind::Pin, 0, crate::bootstrap::workspace_state(&root), None);
-    }
-    ledger.push(Kind::Task, 0, task.to_string(), None);
-    let mut ws = Workspace::new(root.clone());
-    let mut renderer = Renderer::new();
+    let root = session.root.clone();
+    let ledger = &mut session.ledger;
+    let ws = &mut session.ws;
+    let renderer = &mut session.renderer;
+    ledger.push(Kind::Task, session.turn_base, task.to_string(), None);
     let client = Client::new(cfg.model.clone(), cfg.api_key());
     let system = build_system(&cfg, prof.map(|p| p.system.as_str()), prof.map(|p| p.tools.as_str()));
     let allowed: Option<Vec<char>> = prof.map(|p| p.tools.chars().collect());
 
     let mut rep = Report::default();
     let mut empty_turns = 0u32;
+    let base = session.turn_base;
 
-    for turn in 1..=max_turns {
+    for i in 1..=max_turns {
+        // Ledger turn numbers keep counting across tasks in a continued
+        // session so the renderer's age-based folding stays correct.
+        let turn = base + i;
         if ctl.stopped() {
             rep.final_msg = "(stopped)".into();
             break;
         }
-        rep.turns = turn;
-        ctl.emit(Ev::Turn(turn));
+        rep.turns = i;
+        ctl.emit(Ev::Turn(i));
         let t_r = Instant::now();
-        let doc = renderer.render(&ledger, &ctx_cfg, turn);
+        let doc = renderer.render(ledger, &ctx_cfg, turn);
         let user = format!("{}{}\n## NOW\nNext commands:\n", ws.legend(), doc);
         rep.render_us += t_r.elapsed().as_micros();
         rep.sent_tokens += est_tokens(&system) + est_tokens(&user);
@@ -162,7 +202,7 @@ pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, d
                         std::thread::spawn(move || run(cfg2, root2, &t2, Some(&p2), depth + 1, ctl2)),
                     ));
                 }
-                other => exec_one(other, &mut ws, &mut ledger, &cfg, &client, task, turn, &ctx_cfg, &ctl, depth),
+                other => exec_one(other, ws, ledger, &cfg, &client, task, turn, &ctx_cfg, &ctl, depth),
             }
         }
         for (name, h) in spawned {
@@ -187,17 +227,17 @@ pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, d
     if rep.final_msg.is_empty() {
         rep.final_msg = "(max turns reached)".into();
     }
+    session.turn_base = base + rep.turns;
     rep.wall_ms = t_start.elapsed().as_millis();
     if depth == 0 {
         ctl.emit(Ev::Report(format!(
-            "{} turns, {} cmds, {:.1}s wall | model {:.1}s | tools {:.1}s | sent ~{}t, out {}ch",
+            "{} turn{} · {} cmd{} · {:.1}s · ~{}t sent",
             rep.turns,
+            if rep.turns == 1 { "" } else { "s" },
             rep.commands,
+            if rep.commands == 1 { "" } else { "s" },
             rep.wall_ms as f64 / 1000.0,
-            rep.model_ms as f64 / 1000.0,
-            rep.tool_ms as f64 / 1000.0,
-            rep.sent_tokens,
-            rep.out_chars
+            rep.sent_tokens
         )));
         ctl.emit(Ev::Done(rep.final_msg.clone()));
     }
