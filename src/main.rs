@@ -3,6 +3,21 @@ use std::sync::Arc;
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Answer CLI probes natively — shells and editors call these, and each one
+    // must not become an LLM conversation.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("haste {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "haste — micro agent harness for wafer-speed inference\n\n\
+             usage: haste [-c config.toml] [-p profile] [-C root] [--tui] [task...]\n\n\
+             With no task, opens the TUI in the current directory.\n\
+             Config lookup: -c, ./haste.toml, ~/.haste.toml, built-in default."
+        );
+        return;
+    }
     let mut cfg_path: Option<String> = None;
     let mut profile: Option<String> = None;
     let mut root = std::env::current_dir().expect("cwd");

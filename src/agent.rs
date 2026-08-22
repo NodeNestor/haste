@@ -122,7 +122,9 @@ pub fn run_session(
     let base = session.turn_base;
     // Background subagents: spawned here, never blocking a turn. Finished ones
     // are harvested at the top of each turn; D waits for stragglers.
-    let mut pending: Vec<(String, std::thread::JoinHandle<Report>)> = Vec::new();
+    // (profile, task, handle) — task kept for duplicate-spawn refusal.
+    let mut pending: Vec<(String, String, std::thread::JoinHandle<Report>)> = Vec::new();
+    const MAX_CONCURRENT_SUBAGENTS: usize = 4;
     // Loop breaker: per exact command, how many times in a row it produced the
     // exact same result. 3 → warn; 5 → refuse to execute it again.
     let mut repeats: std::collections::HashMap<u64, (u32, u64)> = std::collections::HashMap::new();
@@ -159,8 +161,8 @@ pub fn run_session(
         // briefs enter the context now, without ever having blocked a turn.
         let mut k = 0;
         while k < pending.len() {
-            if pending[k].1.is_finished() {
-                let (name, h) = pending.remove(k);
+            if pending[k].2.is_finished() {
+                let (name, _, h) = pending.remove(k);
                 let sub = h.join().unwrap_or_default();
                 harvest(&name, sub, ledger, &ctl, depth, turn, &mut rep);
             } else {
@@ -275,8 +277,29 @@ pub fn run_session(
                         ledger.push(Kind::Result, turn, format!("no profile '{profile}'"), None);
                         continue;
                     }
+                    // The spawn-storm guards: an identical spawn while the
+                    // first is still running is a model mistake, not a wish
+                    // for two of them — and concurrency is capped.
+                    let norm = |s: &str| s.trim_matches('"').trim().to_ascii_lowercase();
+                    if pending.iter().any(|(p, t, _)| *p == profile && norm(t) == norm(&task)) {
+                        let msg = format!("({profile} is ALREADY RUNNING on that task — its brief arrives in a later turn; do not spawn it again)");
+                        ctl.emit(Ev::Result(depth, msg.clone()));
+                        ledger.push(Kind::Result, turn, msg, None);
+                        continue;
+                    }
+                    if pending.len() >= MAX_CONCURRENT_SUBAGENTS {
+                        let msg = format!("(subagent limit: {} already running — wait for their briefs)", pending.len());
+                        ctl.emit(Ev::Result(depth, msg.clone()));
+                        ledger.push(Kind::Result, turn, msg, None);
+                        continue;
+                    }
                     ledger.push(Kind::Action, turn, format!("A {profile} {task}"), None);
                     ctl.emit(Ev::Action(depth, format!("A {profile} {task}")));
+                    // Immediate acknowledgment, so the next turn's context
+                    // proves the spawn happened and nothing needs repeating.
+                    let ack = format!("({profile} started in background — its [{profile}] brief will arrive in a later turn)");
+                    ctl.emit(Ev::Result(depth, ack.clone()));
+                    ledger.push(Kind::Result, turn, ack, None);
                     let cfg2 = Arc::clone(&cfg);
                     let root2 = root.clone();
                     let p2 = profile.clone();
@@ -284,6 +307,7 @@ pub fn run_session(
                     let ctl2 = ctl.clone();
                     pending.push((
                         profile,
+                        task,
                         std::thread::spawn(move || run(cfg2, root2, &t2, Some(&p2), depth + 1, ctl2)),
                     ));
                 }
@@ -327,7 +351,7 @@ pub fn run_session(
                     depth,
                     format!("(waiting on {} subagent{} before finishing…)", pending.len(), if pending.len() == 1 { "" } else { "s" }),
                 ));
-                for (name, h) in pending.drain(..) {
+                for (name, _task, h) in pending.drain(..) {
                     let sub = h.join().unwrap_or_default();
                     harvest(&name, sub, ledger, &ctl, depth, turn, &mut rep);
                 }
@@ -345,7 +369,7 @@ pub fn run_session(
     }
     // Abort paths can leave subagents running: collect them so their work
     // still lands in the ledger and no thread outlives the session silently.
-    for (name, h) in pending.drain(..) {
+    for (name, _task, h) in pending.drain(..) {
         let sub = h.join().unwrap_or_default();
         harvest(&name, sub, ledger, &ctl, depth, base + rep.turns, &mut rep);
     }

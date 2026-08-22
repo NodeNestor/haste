@@ -258,6 +258,43 @@ fn length_cap_writes_partial_and_tells_model_to_continue() {
 }
 
 #[test]
+fn duplicate_subagent_spawns_are_refused() {
+    let sub_turn = if cfg!(windows) { "X powershell -Command Start-Sleep -Milliseconds 900\nD sub done\n" } else { "X sleep 1\nD sub done\n" };
+    let parent_t1 = if cfg!(windows) {
+        "A researcher dig into the repo\nX powershell -Command Start-Sleep -Milliseconds 400\n"
+    } else {
+        "A researcher dig into the repo\nX sleep 0.4\n"
+    };
+    let port = mock_server(vec![
+        // t1: spawn + slow tool (guarantees the researcher requests next).
+        parent_t1,
+        sub_turn, // researcher's single concurrent turn
+        // t2 (sub still sleeping): the SAME spawn again — must be refused.
+        "A researcher dig into the repo\n",
+        // t3: premature D forces the wait-join; t4 finishes for real.
+        "D finished\n",
+        "D finished\n",
+    ]);
+    let root = temp_repo();
+    let toml = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\n\
+         [context]\nbootstrap = false\n\
+         [profile.researcher]\nsystem = \"research\"\ntools = \"RGX\"\n"
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "go", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "finished");
+    let texts: Vec<&str> = session.ledger.entries.iter().map(|e| e.text.as_str()).collect();
+    assert!(texts.iter().any(|t| t.contains("started in background")), "spawn ack missing: {texts:?}");
+    assert!(texts.iter().any(|t| t.contains("ALREADY RUNNING")), "duplicate refusal missing: {texts:?}");
+    // Exactly one researcher actually ran.
+    let spawns = texts.iter().filter(|t| t.starts_with("A researcher")).count();
+    assert_eq!(spawns, 1, "duplicate was spawned anyway");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn degenerate_spam_is_cut_and_retried() {
     let spam: &'static str = Box::leak(format!("R greet.txt\n{}", "!".repeat(300)).into_boxed_str());
     let port = mock_server(vec![spam, "D recovered\n"]);
