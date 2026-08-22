@@ -15,6 +15,26 @@ pub struct Config {
     pub profile: BTreeMap<String, ProfileCfg>,
     #[serde(default)]
     pub distill: DistillCfg,
+    #[serde(default)]
+    pub exec: ExecCfg,
+}
+
+/// How X and config tools run their command lines.
+#[derive(Deserialize, Clone)]
+pub struct ExecCfg {
+    /// "powershell" | "cmd" | "sh". PowerShell is the Windows default: the
+    /// model can use cmdlets directly with zero nested-quoting (cmd.exe
+    /// mangles inner quotes, which sends weak models into retry loops).
+    #[serde(default = "d_shell")]
+    pub shell: String,
+}
+fn d_shell() -> String {
+    if cfg!(windows) { "powershell".into() } else { "sh".into() }
+}
+impl Default for ExecCfg {
+    fn default() -> Self {
+        Self { shell: d_shell() }
+    }
 }
 
 #[derive(Deserialize, Clone)]

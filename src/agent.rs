@@ -1,4 +1,4 @@
-use crate::client::Client;
+﻿use crate::client::Client;
 use crate::config::Config;
 use crate::dsl::{Cmd, Lexer};
 use crate::ledger::{est_tokens, Kind, Ledger};
@@ -71,7 +71,7 @@ impl Session {
         let tee = (depth == 0).then(|| root.join(".haste").join("ledger.jsonl"));
         let mut ledger = Ledger::new(tee.as_deref());
         if depth == 0 && cfg.context.bootstrap {
-            ledger.push(Kind::Pin, 0, crate::bootstrap::workspace_state(&root), None);
+            ledger.push(Kind::Pin, 0, crate::bootstrap::workspace_state(&root, &cfg.exec.shell), None);
         }
         Session {
             ledger,
@@ -117,6 +117,9 @@ pub fn run_session(
     let mut rep = Report::default();
     let mut empty_turns = 0u32;
     let base = session.turn_base;
+    // Loop breaker: per exact command, how many times in a row it produced the
+    // exact same result. 3 → warn; 5 → refuse to execute it again.
+    let mut repeats: std::collections::HashMap<u64, (u32, u64)> = std::collections::HashMap::new();
 
     for i in 1..=max_turns {
         // Ledger turn numbers keep counting across tasks in a continued
@@ -202,7 +205,28 @@ pub fn run_session(
                         std::thread::spawn(move || run(cfg2, root2, &t2, Some(&p2), depth + 1, ctl2)),
                     ));
                 }
-                other => exec_one(other, ws, ledger, &cfg, &client, task, turn, &ctx_cfg, &ctl, depth),
+                other => {
+                    let key = crate::ledger::fnv(&format!("{other:?}"));
+                    if repeats.get(&key).map_or(false, |(n, _)| *n >= 5) {
+                        let msg = "(refused: this exact command has repeated 5+ times with the same result — do something DIFFERENT, or answer with D)";
+                        ctl.emit(Ev::Result(depth, msg.into()));
+                        ledger.push(Kind::Result, turn, msg.into(), None);
+                        continue;
+                    }
+                    exec_one(other, ws, ledger, &cfg, &client, task, turn, &ctx_cfg, &ctl, depth);
+                    let res_hash = ledger.entries.last().map(|e| e.hash).unwrap_or(0);
+                    let e = repeats.entry(key).or_insert((0, 0));
+                    if e.1 == res_hash {
+                        e.0 += 1;
+                    } else {
+                        *e = (1, res_hash);
+                    }
+                    if e.0 == 3 {
+                        let msg = "(note: that command has now given the identical result 3 times — running it again will not help; change approach)";
+                        ctl.emit(Ev::Result(depth, msg.into()));
+                        ledger.push(Kind::Result, turn, msg.into(), None);
+                    }
+                }
             }
         }
         for (name, h) in spawned {
@@ -231,7 +255,7 @@ pub fn run_session(
     rep.wall_ms = t_start.elapsed().as_millis();
     if depth == 0 {
         ctl.emit(Ev::Report(format!(
-            "{} turn{} · {} cmd{} · {:.1}s · ~{}t sent",
+            "{} turn{} Â· {} cmd{} Â· {:.1}s Â· ~{}t sent",
             rep.turns,
             if rep.turns == 1 { "" } else { "s" },
             rep.commands,
@@ -322,7 +346,7 @@ fn exec_one(
         }
         Cmd::Exec { line } => {
             let act = format!("X {line}");
-            let r = run_shell(&line, &ws.root, DEFAULT_TOOL_TIMEOUT_MS);
+            let r = run_shell(&line, &ws.root, DEFAULT_TOOL_TIMEOUT_MS, &cfg.exec.shell);
             (act, r, None)
         }
         Cmd::Custom { verb, args } => {
@@ -331,7 +355,7 @@ fn exec_one(
             match cfg.tool.get(&key) {
                 Some(t) => {
                     let line = t.cmd.replace("{args}", &args);
-                    let raw = run_shell(&line, &ws.root, t.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS));
+                    let raw = run_shell(&line, &ws.root, t.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS), &cfg.exec.shell);
                     let spec = t.prune.as_deref().unwrap_or("");
                     let pruned = if spec.split('|').any(|s| s.trim() == "distill") {
                         distill(client, cfg, task, &prune(spec, &raw))
@@ -411,3 +435,4 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     );
     s
 }
+

@@ -183,6 +183,28 @@ fn event_stream_feeds_a_ui() {
 }
 
 #[test]
+fn loop_breaker_warns_then_refuses() {
+    // Model stuck repeating the identical command every turn.
+    let same = "G \"wrold\" greet.txt\n";
+    let port = mock_server(vec![same, same, same, same, same, same, same, "D gave up\n"]);
+    let root = temp_repo();
+    let cfg = Arc::new(cfg_for(port));
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "loop", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "gave up");
+    let texts: Vec<&str> = session.ledger.entries.iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        texts.iter().any(|t| t.contains("identical result 3 times")),
+        "warning missing: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("refused: this exact command")),
+        "refusal missing: {texts:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn continued_session_shares_ledger() {
     let port = mock_server(vec!["D one\n", "D two\n"]);
     let root = temp_repo();

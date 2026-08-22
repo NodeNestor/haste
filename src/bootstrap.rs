@@ -11,13 +11,15 @@ use std::process::Command;
 const MAX_CHARS: usize = 3000;
 const TREE_DEPTH: usize = 3;
 
-pub fn workspace_state(root: &Path) -> String {
+pub fn workspace_state(root: &Path, shell: &str) -> String {
     let mut out = String::from("--- workspace ---\n");
-    if cfg!(windows) {
-        out.push_str("os: Windows — X runs cmd.exe (dir, type, findstr; no ls/cat/grep)\n");
-    } else {
-        out.push_str("os: unix — X runs sh\n");
-    }
+    let os = if cfg!(windows) { "Windows" } else { "unix" };
+    let shell_note = match shell {
+        "powershell" => "X runs PowerShell directly — use cmdlets and pipelines as-is, never nest 'powershell -Command'",
+        "cmd" => "X runs cmd.exe (dir, type, findstr; no ls/cat/grep)",
+        _ => "X runs sh",
+    };
+    out.push_str(&format!("os: {os} — {shell_note}\n"));
     if let Some(kind) = project_kind(root) {
         out.push_str(&format!("project: {kind}\n"));
     }
@@ -135,8 +137,9 @@ mod tests {
 
     #[test]
     fn orients_in_own_repo() {
-        let s = workspace_state(Path::new("."));
+        let s = workspace_state(Path::new("."), "powershell");
         assert!(s.contains("project: Rust"), "{s}");
+        assert!(s.contains("PowerShell"), "{s}");
         // src/ has >10 files, so the map falls back to extension counts.
         assert!(s.contains("src/ [") && s.contains(".rs"), "{s}");
         // A small dir still lists real filenames.
@@ -150,7 +153,7 @@ mod tests {
         std::fs::create_dir_all(&p).unwrap();
         std::fs::write(p.join("x.py"), "pass\n").unwrap();
         let t = std::time::Instant::now();
-        let s = workspace_state(&p);
+        let s = workspace_state(&p, "cmd");
         assert!(t.elapsed().as_millis() < 100, "bootstrap slow: {:?}", t.elapsed());
         assert!(!s.contains("git:"), "{s}");
         let _ = std::fs::remove_dir_all(p);

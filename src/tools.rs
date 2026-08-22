@@ -200,15 +200,23 @@ fn region_report(id: u32, lines: &[String], start: usize, nnew: usize) -> String
 }
 
 /// Run a shell line, kill on timeout, merge stdout+stderr, report exit code.
-pub fn run_shell(line: &str, cwd: &Path, timeout_ms: u64) -> String {
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", line]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", line]);
-        c
+pub fn run_shell(line: &str, cwd: &Path, timeout_ms: u64, shell: &str) -> String {
+    let mut cmd = match shell {
+        "powershell" => {
+            let mut c = Command::new("powershell");
+            c.args(["-NoProfile", "-NonInteractive", "-Command", line]);
+            c
+        }
+        "cmd" => {
+            let mut c = Command::new("cmd");
+            c.args(["/C", line]);
+            c
+        }
+        _ => {
+            let mut c = Command::new("sh");
+            c.args(["-c", line]);
+            c
+        }
     };
     cmd.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = match cmd.spawn() {
@@ -415,9 +423,26 @@ mod tests {
     #[test]
     fn shell_timeout_and_exit() {
         let cwd = std::env::temp_dir();
-        let r = run_shell(if cfg!(windows) { "exit 3" } else { "exit 3" }, &cwd, 5000);
+        let sh = crate::config::ExecCfg::default().shell;
+        let r = run_shell("exit 3", &cwd, 15000, &sh);
         assert!(r.starts_with("exit 3"), "{r}");
-        let ok = run_shell("echo hi", &cwd, 5000);
+        let ok = run_shell("echo hi", &cwd, 15000, &sh);
         assert!(ok.contains("hi"));
+    }
+
+    #[test]
+    fn powershell_no_quote_mangling() {
+        if !cfg!(windows) {
+            return;
+        }
+        // The doom-loop trigger: pipelines with $_ and quotes must survive intact.
+        let cwd = std::env::temp_dir();
+        let r = run_shell(
+            "@(1,2,3) | ForEach-Object { \"n=$_\" } | Select-Object -First 2",
+            &cwd,
+            20000,
+            "powershell",
+        );
+        assert!(r.contains("n=1") && r.contains("n=2"), "{r}");
     }
 }
