@@ -17,6 +17,26 @@ pub struct Config {
     pub distill: DistillCfg,
     #[serde(default)]
     pub exec: ExecCfg,
+    #[serde(default)]
+    pub plan: PlanCfg,
+}
+
+/// The plan-file state machine (see plan.rs).
+#[derive(Deserialize, Clone)]
+pub struct PlanCfg {
+    #[serde(default = "d_plan_file")]
+    pub file: String,
+    /// Refuse D while plan steps are open, auto-verify steps marked done.
+    #[serde(default = "d_true")]
+    pub enforce: bool,
+}
+fn d_plan_file() -> String {
+    "plan.json".into()
+}
+impl Default for PlanCfg {
+    fn default() -> Self {
+        Self { file: d_plan_file(), enforce: true }
+    }
 }
 
 /// How X and config tools run their command lines.

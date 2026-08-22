@@ -284,6 +284,49 @@ fn say_speaks_without_ending_the_run() {
 }
 
 #[test]
+fn plan_state_machine_enforces_and_verifies() {
+    let port = mock_server(vec![
+        // t1: write a plan with one verifiable step, then try to D early.
+        "N plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"fix\",\"what\":\"fix greet\",\"status\":\"doing\",\"verify\":\"echo ok\"}]}\n.\nD all done\n",
+        // t2 (D was refused): mark the step done, then D for real.
+        "E 0 1:1\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"fix\",\"what\":\"fix greet\",\"status\":\"done\",\"verify\":\"echo ok\"}]}\n.\nD actually done\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "do the plan", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "actually done");
+    assert_eq!(rep.turns, 2);
+    let ledger_texts: Vec<String> = std::fs::read_to_string(root.join(".haste/ledger.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["text"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        ledger_texts.iter().any(|t| t.contains("D refused") && t.contains("fix")),
+        "refusal missing: {ledger_texts:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn lying_about_done_gets_reverted_by_verify() {
+    let port = mock_server(vec![
+        // One step whose verify fails — model claims done and tries to D.
+        "N plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"broken\",\"status\":\"done\",\"verify\":\"exit 3\"}]}\n.\nD shipped it\n",
+        // After the revert + refusal, model descopes honestly (N overwrites —
+        // the revert-save pretty-printed the file, so line edits are stale).
+        "N plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"broken\",\"status\":\"skip\",\"verify\":\"exit 3\"}]}\n.\nD descoped\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "ship", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "descoped");
+    let plan = std::fs::read_to_string(root.join("plan.json")).unwrap();
+    assert!(plan.contains("skip"), "{plan}");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("verify FAILED"), "revert note missing");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn solo_say_hands_the_mic_back() {
     // A clarification question with no work must END the run, not loop.
     let port = mock_server(vec!["S what would you like me to do?\n"]);

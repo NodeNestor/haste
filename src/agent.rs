@@ -138,6 +138,9 @@ pub fn run_session(
     // Loop breaker: per exact command, how many times in a row it produced the
     // exact same result. 3 → warn; 5 → refuse to execute it again.
     let mut repeats: std::collections::HashMap<u64, (u32, u64)> = std::collections::HashMap::new();
+    // Plan state machine: last-seen step statuses, for detecting done-transitions.
+    let plan_path = root.join(&cfg.plan.file);
+    let mut plan_seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     let mut i = 0u32;
     loop {
@@ -207,12 +210,19 @@ pub fn run_session(
             }
         }
 
+        // Plan tick: verify fresh "done"s, get the always-visible view.
+        let (plan_view, _) = if cfg.plan.enforce {
+            plan_tick(&plan_path, &mut plan_seen, &cfg.exec.shell, &root, ledger, &ctl, depth, turn)
+        } else {
+            (String::new(), Vec::new())
+        };
+
         let t_r = Instant::now();
         let doc = renderer.render(ledger, &ctx_cfg, turn);
-        // File legend goes at the BOTTOM: it grows as files intern, and
-        // anything that changes near the top of the document would shift every
-        // byte after it and invalidate the provider's prefix cache.
-        let user = format!("{}\n{}## NOW\nNext commands:\n", doc, ws.legend());
+        // File legend and plan view go at the BOTTOM: they change as work
+        // progresses, and anything that changes near the top of the document
+        // would shift every byte after it and invalidate the prefix cache.
+        let user = format!("{}\n{}{}## NOW\nNext commands:\n", doc, ws.legend(), plan_view);
         rep.render_us += t_r.elapsed().as_micros();
         rep.sent_tokens += est_tokens(&system) + est_tokens(&user);
 
@@ -291,10 +301,12 @@ pub fn run_session(
 
         let t_tools = Instant::now();
         let mut done: Option<String> = None;
+        let mut say_final = false;
         // A turn that is ONLY talk (S with no work and no subagents pending)
         // means the model is waiting on the user: hand the mic back instead of
         // looping into ever-rephrased clarification questions.
         if pending.is_empty() && cmds.iter().all(|c| matches!(c, Cmd::Say { .. })) && !cmds.is_empty() {
+            say_final = true;
             let text = cmds
                 .drain(..)
                 .map(|c| match c {
@@ -403,6 +415,27 @@ pub fn run_session(
         }
 
         if let Some(msg) = done {
+            // The plan state machine gets the last word on finishing: verify
+            // any statuses changed THIS turn, then refuse D while steps are
+            // open. Solo-S mic-backs are conversation, not completion — exempt.
+            if cfg.plan.enforce && !say_final {
+                let (_, open) =
+                    plan_tick(&plan_path, &mut plan_seen, &cfg.exec.shell, &root, ledger, &ctl, depth, turn);
+                if !open.is_empty() {
+                    note(
+                        ledger,
+                        &ctl,
+                        depth,
+                        turn,
+                        format!(
+                            "(D refused — the plan has open steps: {}. Finish and mark them done, or edit {} to descope them with status \"skip\")",
+                            open.join(", "),
+                            cfg.plan.file
+                        ),
+                    );
+                    continue;
+                }
+            }
             if !pending.is_empty() {
                 // D while subagents are still out: wait for them, feed their
                 // briefs to the model, and let it finish with full knowledge.
@@ -597,6 +630,68 @@ fn note(ledger: &mut Ledger, ctl: &Ctl, depth: u8, turn: u32, text: String) {
     ledger.push(Kind::Result, turn, text, None);
 }
 
+/// Load the plan, auto-verify steps freshly marked done (revert on failure),
+/// and return (compact view, open step ids). A broken plan file blocks D.
+#[allow(clippy::too_many_arguments)]
+fn plan_tick(
+    plan_path: &std::path::Path,
+    seen: &mut std::collections::HashMap<String, String>,
+    shell: &str,
+    root: &std::path::Path,
+    ledger: &mut Ledger,
+    ctl: &Ctl,
+    depth: u8,
+    turn: u32,
+) -> (String, Vec<String>) {
+    use crate::plan::Plan;
+    let Some(res) = Plan::load(plan_path) else {
+        return (String::new(), Vec::new());
+    };
+    let mut p = match res {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                format!("## PLAN: PARSE ERROR — fix the file: {}\n", crate::tools::clip(&e, 200)),
+                vec!["(unparseable plan)".into()],
+            )
+        }
+    };
+    let mut dirty = false;
+    for i in 0..p.steps.len() {
+        let id = p.steps[i].id.clone();
+        let newly_done = p.steps[i].status == "done"
+            && seen.get(&id).map(String::as_str).unwrap_or("todo") != "done";
+        if !newly_done {
+            continue;
+        }
+        if let Some(v) = p.steps[i].verify.clone() {
+            let out = run_shell(&v, root, DEFAULT_TOOL_TIMEOUT_MS, shell);
+            if !out.starts_with("ok") {
+                p.steps[i].status = "doing".into();
+                dirty = true;
+                note(
+                    ledger,
+                    ctl,
+                    depth,
+                    turn,
+                    format!(
+                        "(plan step '{id}' marked done but its verify FAILED — reverted to doing)\n{}",
+                        prune("first_failure", &out)
+                    ),
+                );
+            }
+        }
+    }
+    if dirty {
+        let _ = p.save(plan_path);
+    }
+    seen.clear();
+    for s in &p.steps {
+        seen.insert(s.id.clone(), s.status.clone());
+    }
+    (p.compact(), p.open_ids())
+}
+
 fn distill(client: &Client, cfg: &Config, task: &str, text: &str) -> String {
     if text.len() < 600 {
         return text.to_string();
@@ -649,6 +744,7 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     }
     s.push_str("S <text>            say one line to the user WITHOUT finishing (progress, questions, findings)\n");
     s.push_str("D <message>         done; message is your final report (may span lines to end of message)\n");
+    let plan_file = &cfg.plan.file;
     s.push_str(
         "Rules: files get ids (#0,#1..) listed in the files: header — refer to them by id (with or without #). \
          In E/I/N content, a line that must start with \".\" gets one extra \".\" prefix. \
@@ -661,6 +757,13 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
          G \"load_cfg\" src\n\
          X python tests.py\n",
     );
+    s.push_str(&format!(
+        "Plan: for multi-step work, create {plan_file} with N — \
+         {{\"goal\":\"...\",\"steps\":[{{\"id\":\"..\",\"what\":\"..\",\"status\":\"todo\",\"needs\":[],\"verify\":\"shell cmd\"}}]}}. \
+         It is a live state machine you keep current by editing it (status: todo/doing/done/skip). \
+         Marking a step done runs its verify automatically and REVERTS the status if it fails. \
+         D is refused while steps are open — finish them or descope with status \"skip\".\n"
+    ));
     s
 }
 

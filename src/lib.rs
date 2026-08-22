@@ -4,6 +4,7 @@ pub mod client;
 pub mod config;
 pub mod dsl;
 pub mod ledger;
+pub mod plan;
 pub mod render;
 pub mod tools;
 pub mod tui;
