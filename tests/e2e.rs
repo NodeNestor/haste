@@ -155,6 +155,60 @@ max_turns = 3
 }
 
 #[test]
+fn renderer_stress_huge_ledger() {
+    // 10k entries, ~5MB of raw ledger text — a long session far past any budget.
+    let mut ledger = Ledger::new(None);
+    ledger.push(Kind::Task, 0, "stress task".into(), None);
+    for turn in 1..=2500u32 {
+        ledger.push(Kind::Action, turn, format!("X step {turn}"), None);
+        ledger.push(
+            Kind::Result,
+            turn,
+            format!("output for step {turn}\n{}", format!("detail {turn} line\n").repeat(30)),
+            Some(turn % 120),
+        );
+        ledger.push(Kind::Action, turn, format!("R {}", turn % 120), None);
+        ledger.push(
+            Kind::Result,
+            turn,
+            format!("#{} file.rs 1:40 of 40\n{}", turn % 120, "1:code line\n".repeat(40)),
+            Some(turn % 120),
+        );
+    }
+    let raw: usize = ledger.entries.iter().map(|e| e.text.len()).sum();
+    let cfg = haste::config::CtxCfg::default();
+
+    let mut r = Renderer::new();
+    let doc = r.render(&ledger, &cfg, 2501);
+    let t = std::time::Instant::now();
+    let iters = 20;
+    for _ in 0..iters {
+        let _ = r.render(&ledger, &cfg, 2501);
+    }
+    let ws_ms = t.elapsed().as_micros() as f64 / iters as f64 / 1000.0;
+
+    let mut acfg = cfg.clone();
+    acfg.mode = "append".into();
+    let mut ra = Renderer::new();
+    let adoc = ra.render(&ledger, &acfg, 2501);
+    let t2 = std::time::Instant::now();
+    for _ in 0..iters {
+        let _ = ra.render(&ledger, &acfg, 2501);
+    }
+    let ap_ms = t2.elapsed().as_micros() as f64 / iters as f64 / 1000.0;
+
+    println!(
+        "STRESS: {} entries, {:.1}MB raw -> working_set {} chars in {ws_ms:.2}ms | append {} chars in {ap_ms:.2}ms",
+        ledger.entries.len(),
+        raw as f64 / 1e6,
+        doc.len(),
+        adoc.len()
+    );
+    assert!(ws_ms < 50.0, "working_set render too slow: {ws_ms}ms");
+    assert!(ap_ms < 50.0, "append render too slow: {ap_ms}ms");
+}
+
+#[test]
 fn renderer_bench_1000_entries() {
     let mut ledger = Ledger::new(None);
     ledger.push(Kind::Task, 0, "benchmark task".into(), None);
