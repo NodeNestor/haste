@@ -428,7 +428,7 @@ pub fn run_session(
                         depth,
                         turn,
                         format!(
-                            "(D refused — the plan has open steps: {}. Finish and mark them done, or edit {} to descope them with status \"skip\")",
+                            "(D refused — the plan has open steps: {}. Finish and mark them done, or edit {} to descope with status \"skip\". To narrate progress use S, not D)",
                             open.join(", "),
                             cfg.plan.file
                         ),

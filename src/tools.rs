@@ -78,6 +78,11 @@ impl Workspace {
             return Ok((id, self.root.join(rel)));
         }
         let rel = PathBuf::from(target.replace('\\', "/"));
+        // The .haste dir is harness-internal (the session's own ledger tee) —
+        // reading your own memory back into context is pure waste.
+        if rel.components().any(|c| c.as_os_str() == ".haste") {
+            return Err(".haste is harness-internal — you already know its contents".into());
+        }
         let abs = self.root.join(&rel);
         if !abs.is_file() {
             return Err(format!("not a file: {target}"));
@@ -514,6 +519,15 @@ mod tests {
         w.edit("0", 1, 1, "").unwrap();
         let r = w.read("0", Some((1, 1))).unwrap();
         assert!(r.contains("1:one"));
+    }
+
+    #[test]
+    fn haste_internals_are_unreadable() {
+        let (mut w, _td) = ws();
+        std::fs::create_dir_all(w.root.join(".haste")).unwrap();
+        std::fs::write(w.root.join(".haste/ledger.jsonl"), "{}").unwrap();
+        assert!(w.read(".haste/ledger.jsonl", None).unwrap_err().contains("harness-internal"));
+        assert!(w.read(".haste\\ledger.jsonl", None).is_err());
     }
 
     #[test]
