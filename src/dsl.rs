@@ -27,6 +27,8 @@ pub enum Cmd {
     Say { text: String },
     /// Signature outline of a file or directory (codemap).
     Outline { target: String },
+    /// Search/replace edit (cc-json dialect: the Edit tool's old/new strings).
+    Replace { target: String, old: String, new: String },
     Custom { verb: char, args: String },
 }
 
@@ -43,6 +45,8 @@ pub struct Lexer {
     buf: String,
     pending: Option<(Pending, Vec<String>)>,
     done_msg: Option<String>,
+    /// Accept Claude-Code-style {"tool":...,"input":...} lines as commands.
+    cc_json: bool,
 }
 
 impl Default for Lexer {
@@ -53,7 +57,11 @@ impl Default for Lexer {
 
 impl Lexer {
     pub fn new() -> Lexer {
-        Lexer { buf: String::new(), pending: None, done_msg: None }
+        Lexer { buf: String::new(), pending: None, done_msg: None, cc_json: false }
+    }
+
+    pub fn new_dialect(cc_json: bool) -> Lexer {
+        Lexer { cc_json, ..Lexer::new() }
     }
 
     pub fn feed(&mut self, chunk: &str, out: &mut Vec<Cmd>) {
@@ -98,6 +106,12 @@ impl Lexer {
         }
         let line = line.trim_start();
         if line.is_empty() {
+            return;
+        }
+        if self.cc_json && line.starts_with('{') {
+            if let Some(cmd) = parse_cc_tool(line) {
+                out.push(cmd);
+            }
             return;
         }
         let mut it = line.splitn(2, ' ');
@@ -175,6 +189,37 @@ impl Lexer {
             }
             _ => {}
         }
+    }
+}
+
+/// Map a Claude-Code tool call line onto haste commands. Unknown tools are
+/// ignored (the empty-turn nudge handles a message of only unknowns).
+fn parse_cc_tool(line: &str) -> Option<Cmd> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let tool = v["tool"].as_str().or_else(|| v["name"].as_str())?;
+    let inp = if v["input"].is_object() { &v["input"] } else { &v["arguments"] };
+    let s = |k: &str| inp[k].as_str().map(str::to_string);
+    match tool {
+        "Bash" => Some(Cmd::Exec { line: s("command")? }),
+        "Read" => {
+            let target = s("file_path").or_else(|| s("path"))?;
+            let range = match (inp["offset"].as_u64(), inp["limit"].as_u64()) {
+                (Some(o), Some(l)) => Some((o as usize, (o + l - 1) as usize)),
+                (Some(o), None) => Some((o as usize, usize::MAX / 2)),
+                _ => None,
+            };
+            Some(Cmd::Read { target, range })
+        }
+        "Write" => Some(Cmd::New { path: s("file_path").or_else(|| s("path"))?, body: s("content")? }),
+        "Edit" => Some(Cmd::Replace {
+            target: s("file_path").or_else(|| s("path"))?,
+            old: s("old_string")?,
+            new: s("new_string")?,
+        }),
+        "Grep" => Some(Cmd::Grep { pat: s("pattern")?, target: s("path") }),
+        "Glob" => Some(Cmd::Grep { pat: s("pattern")?, target: s("path") }),
+        "Task" => Some(Cmd::Agent { profile: "researcher".into(), task: s("prompt")? }),
+        _ => None,
     }
 }
 

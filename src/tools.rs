@@ -125,6 +125,25 @@ impl Workspace {
         Ok(region_report(id, &lines, a, nnew))
     }
 
+    /// Search/replace edit (cc-json dialect). The old string must match
+    /// exactly once; reports the renumbered region like line edits do.
+    pub fn replace(&mut self, target: &str, old: &str, new: &str) -> Result<String, String> {
+        let (id, abs) = self.resolve(target)?;
+        let text = std::fs::read_to_string(&abs).map_err(|e| e.to_string())?;
+        let hits = text.matches(old).count();
+        if hits == 0 {
+            return Err(format!("old_string not found in #{id}"));
+        }
+        if hits > 1 {
+            return Err(format!("old_string matches {hits} times in #{id} — make it unique"));
+        }
+        let start_line = text[..text.find(old).unwrap()].lines().count().max(1);
+        let out = text.replacen(old, new, 1);
+        std::fs::write(&abs, &out).map_err(|e| e.to_string())?;
+        let lines: Vec<String> = out.lines().map(String::from).collect();
+        Ok(region_report(id, &lines, start_line, new.lines().count().max(1)))
+    }
+
     /// Insert body after line `after` (0 = top of file).
     pub fn insert(&mut self, target: &str, after: usize, body: &str) -> Result<String, String> {
         let (id, abs) = self.resolve(target)?;

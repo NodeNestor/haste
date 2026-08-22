@@ -120,6 +120,7 @@ pub fn run_session(
     let renderer = &mut session.renderer;
     ledger.push(Kind::Task, session.turn_base, task.to_string(), None);
     let client = Client::new(cfg.model.clone(), cfg.api_key());
+    let cc = cfg.model.dialect == "cc-json";
     let system = build_system(&cfg, prof.map(|p| p.system.as_str()), prof.map(|p| p.tools.as_str()));
     let allowed: Option<Vec<char>> = prof.map(|p| p.tools.chars().collect());
 
@@ -227,11 +228,15 @@ pub fn run_session(
         rep.sent_tokens += est_tokens(&system) + est_tokens(&user);
 
         let turn_images = std::mem::take(&mut images);
-        let mut lexer = Lexer::new();
+        let mut lexer = Lexer::new_dialect(cc);
         let mut cmds: Vec<Cmd> = Vec::new();
+        let mut raw = String::new();
         let stream_res = client.stream(&system, &user, &turn_images, &mut |delta| {
             if depth == 0 {
                 ctl.emit(Ev::Delta(delta.to_string()));
+            }
+            if cc {
+                raw.push_str(delta);
             }
             lexer.feed(delta, &mut cmds);
         });
@@ -281,6 +286,11 @@ pub fn run_session(
             }
         } else {
             degens = 0;
+        }
+
+        // cc-json semantics: a message with no tool calls IS the final answer.
+        if cc && cmds.is_empty() && !raw.trim().is_empty() {
+            cmds.push(Cmd::Done { msg: raw.trim().to_string() });
         }
 
         if cmds.is_empty() {
@@ -550,6 +560,7 @@ fn verb_of(cmd: &Cmd) -> char {
         Cmd::View { .. } => 'V',
         Cmd::Say { .. } => 'S',
         Cmd::Outline { .. } => 'O',
+        Cmd::Replace { .. } => 'E',
         Cmd::Custom { verb, .. } => *verb,
     }
 }
@@ -574,6 +585,9 @@ fn action_of(cmd: &Cmd) -> String {
         Cmd::View { target } => format!("V {target}"),
         Cmd::Say { text } => format!("S {}", crate::tools::clip(text, 60)),
         Cmd::Outline { target } => format!("O {target}"),
+        Cmd::Replace { target, old, new } => {
+            format!("E {target} (replace {}ch -> {}ch)", old.len(), new.len())
+        }
     }
 }
 
@@ -604,6 +618,7 @@ fn exec_one(
         }
         Cmd::Edit { target, a, b, body } => flat(ws.edit(&target, a, b, &body)),
         Cmd::Insert { target, after, body } => flat(ws.insert(&target, after, &body)),
+        Cmd::Replace { target, old, new } => flat(ws.replace(&target, &old, &new)),
         Cmd::New { path, body } => flat(ws.new_file(&path, &body)),
         Cmd::Grep { pat, target } => flat(ws.grep(&pat, target.as_deref())),
         Cmd::Outline { target } => flat(ws.outline(&target)),
@@ -641,7 +656,7 @@ fn rescue_done(cmds: &mut Vec<Cmd>, cfg: &Config) {
     if rest.trim().is_empty() {
         return;
     }
-    let mut lx = Lexer::new();
+    let mut lx = Lexer::new_dialect(cfg.model.dialect == "cc-json");
     let mut sub = Vec::new();
     lx.feed(&format!("{rest}\n"), &mut sub);
     lx.finish(&mut sub);
@@ -752,6 +767,29 @@ fn cap(s: String, max: usize) -> String {
 }
 
 fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str>) -> String {
+    if cfg.model.dialect == "cc-json" {
+        // For models finetuned on Claude Code traces (fable): speak their
+        // native tool format instead of retraining them via prompt.
+        let mut s = String::from(
+            "You are a fast coding agent. Act by emitting tool calls, ONE single-line JSON per line:\n\
+             {\"tool\":\"Bash\",\"input\":{\"command\":\"...\"}}\n\
+             {\"tool\":\"Read\",\"input\":{\"file_path\":\"...\"}}\n\
+             {\"tool\":\"Write\",\"input\":{\"file_path\":\"...\",\"content\":\"...\"}}\n\
+             {\"tool\":\"Edit\",\"input\":{\"file_path\":\"...\",\"old_string\":\"...\",\"new_string\":\"...\"}}\n\
+             {\"tool\":\"Grep\",\"input\":{\"pattern\":\"...\",\"path\":\"...\"}}\n\
+             Several calls per message are allowed. Tool results arrive in the next message. \
+             A message containing no tool calls is your FINAL answer to the user — only send one when done. \
+             Edit old_string must match the file exactly once.\n",
+        );
+        if let Some(ps) = profile_system {
+            s.push_str(ps);
+            s.push('\n');
+        }
+        if !cfg.prompt_extra.is_empty() {
+            s.push_str(&cfg.prompt_extra);
+        }
+        return s;
+    }
     let allow = |v: char| allowed.is_none_or(|a| a.contains(v));
     let mut s = String::from(
         "You are haste, a fast coding agent. You act ONLY by emitting command lines. \
