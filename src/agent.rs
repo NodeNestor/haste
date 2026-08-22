@@ -299,6 +299,7 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
         "Rules: files get ids (#0,#1..) listed in the files: header — refer to them by id (with or without #). \
          In E/I/N content, a line that must start with \".\" gets one extra \".\" prefix. \
          Batch independent commands in one message. Results arrive in the next message. \
+         Edit results already show the updated lines — do not re-read a file after editing it. \
          Verify edits by running checks/tests. Be terse.\n\
          Example message (nothing but commands):\n\
          R config.py\n\
