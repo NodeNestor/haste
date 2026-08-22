@@ -355,6 +355,18 @@ fn ascii_art_survives_the_degeneration_guard() {
 }
 
 #[test]
+fn phrase_loops_are_cut_like_char_spam() {
+    // Sentence-level repetition: no char/pair run, but the same phrase forever.
+    let spam: &'static str = Box::leak("the model is stuck here. ".repeat(40).into_boxed_str());
+    let looped: &'static str = Box::leak(format!("D {spam}\n").into_boxed_str());
+    let port = mock_server(vec![looped, "D recovered\n"]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "task", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "recovered", "phrase loop was not cut");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn endless_collapse_aborts_with_explanation() {
     let spam: &'static str = Box::leak("!".repeat(600).into_boxed_str());
     let port = mock_server(vec![spam, spam, spam, spam, spam, spam, spam, spam]);

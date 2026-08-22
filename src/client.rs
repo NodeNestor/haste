@@ -95,6 +95,11 @@ impl Client {
         // connection, and report it — a retry costs less than a ruined turn.
         let (mut last, mut run) = ('\0', 0u32);
         let (mut prev2, mut pair_run) = ('\0', 0u32);
+        // Phrase-loop detection: a rolling tail of recent output, scanned for
+        // three identical consecutive blocks (sentence-level repetition that
+        // char/pair runs cannot see).
+        let mut tail: Vec<u8> = Vec::with_capacity(700);
+        let mut since_scan = 0usize;
         let mut degenerate = false;
         let reader = BufReader::new(resp.into_reader());
         'outer: for line in reader.lines() {
@@ -125,6 +130,19 @@ impl Client {
                             break 'outer;
                         }
                     }
+                    tail.extend_from_slice(delta.as_bytes());
+                    if tail.len() > 640 {
+                        tail.drain(..tail.len() - 640);
+                    }
+                    since_scan += delta.len();
+                    if since_scan >= 48 {
+                        since_scan = 0;
+                        if Self::phrase_loop(&tail) {
+                            degenerate = true;
+                            finish_reason = Some("degenerate".into());
+                            break 'outer;
+                        }
+                    }
                     on_delta(delta);
                 }
             }
@@ -136,6 +154,30 @@ impl Client {
             out_chars,
             finish_reason,
         })
+    }
+
+    /// Sentence-level repetition: the tail ends with three IDENTICAL
+    /// consecutive blocks of 20-150 bytes. Blocks of a single repeated
+    /// character are the run-guard's job (and legit as ASCII art), so a
+    /// phrase must have some variety (>=5 distinct bytes) to count.
+    fn phrase_loop(tail: &[u8]) -> bool {
+        let n = tail.len();
+        for p in 20..=150usize {
+            if n < 3 * p {
+                break;
+            }
+            let a = &tail[n - p..];
+            let b = &tail[n - 2 * p..n - p];
+            let c = &tail[n - 3 * p..n - 2 * p];
+            if a == b && b == c {
+                let mut seen = [false; 256];
+                let distinct = a.iter().filter(|&&x| !std::mem::replace(&mut seen[x as usize], true)).count();
+                if distinct >= 5 {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Non-streaming call, used by the distiller.
