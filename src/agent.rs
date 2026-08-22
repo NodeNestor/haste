@@ -351,6 +351,18 @@ pub fn run_session(
             }
             match cmd {
                 Cmd::Done { msg } => done = Some(msg),
+                Cmd::Malformed { line } => {
+                    note(
+                        ledger,
+                        &ctl,
+                        depth,
+                        turn,
+                        format!(
+                            "(malformed tool call — invalid JSON, likely broken quote escaping. Re-emit it as ONE line of valid JSON: {})",
+                            crate::tools::clip(&line, 160)
+                        ),
+                    );
+                }
                 Cmd::Say { text } => {
                     if depth == 0 {
                         ctl.emit(Ev::Say(text.clone()));
@@ -574,6 +586,7 @@ fn verb_of(cmd: &Cmd) -> char {
         Cmd::Say { .. } => 'S',
         Cmd::Outline { .. } => 'O',
         Cmd::Replace { .. } => 'E',
+        Cmd::Malformed { .. } => 'D', // never blocked by profile allowlists
         Cmd::Custom { verb, .. } => *verb,
     }
 }
@@ -601,6 +614,7 @@ fn action_of(cmd: &Cmd) -> String {
         Cmd::Replace { target, old, new } => {
             format!("E {target} (replace {}ch -> {}ch)", old.len(), new.len())
         }
+        Cmd::Malformed { .. } => "(malformed tool call)".into(),
     }
 }
 
@@ -671,7 +685,9 @@ fn exec_one(
             }
             None => format!("err: unknown verb {verb}"),
         },
-        Cmd::Agent { .. } | Cmd::Done { .. } | Cmd::View { .. } | Cmd::Say { .. } => unreachable!("handled by caller"),
+        Cmd::Agent { .. } | Cmd::Done { .. } | Cmd::View { .. } | Cmd::Say { .. } | Cmd::Malformed { .. } => {
+            unreachable!("handled by caller")
+        }
     };
     ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&result, 3), 400)));
     ledger.push(Kind::Action, turn, action, None);

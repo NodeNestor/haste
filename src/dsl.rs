@@ -29,6 +29,9 @@ pub enum Cmd {
     Outline { target: String },
     /// Search/replace edit (cc-json dialect: the Edit tool's old/new strings).
     Replace { target: String, old: String, new: String },
+    /// A line that looked like a tool call but failed to parse (cc dialect) —
+    /// must bounce back as an error, never fall through to prose/final.
+    Malformed { line: String },
     Custom { verb: char, args: String },
 }
 
@@ -116,15 +119,17 @@ impl Lexer {
             if let Some(idx) = line.find(" input={") {
                 let name = line[..idx].rsplit([' ', ')']).next().unwrap_or("");
                 if !name.is_empty() {
-                    if let Some(cmd) = parse_cc_tool_named(name, &line[idx + 7..]) {
-                        out.push(cmd);
+                    match parse_cc_tool_named(name, &line[idx + 7..]) {
+                        Some(cmd) => out.push(cmd),
+                        None => out.push(Cmd::Malformed { line: line.to_string() }),
                     }
                     return;
                 }
             }
             if line.starts_with('{') {
-                if let Some(cmd) = parse_cc_tool(line) {
-                    out.push(cmd);
+                match parse_cc_tool(line) {
+                    Some(cmd) => out.push(cmd),
+                    None => out.push(Cmd::Malformed { line: line.to_string() }),
                 }
                 return;
             }
