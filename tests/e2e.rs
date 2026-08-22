@@ -284,27 +284,6 @@ fn say_speaks_without_ending_the_run() {
 }
 
 #[test]
-fn cc_json_dialect_maps_tools_and_prose_finishes() {
-    let port = mock_server(vec![
-        "{\"tool\":\"Read\",\"input\":{\"file_path\":\"greet.txt\"}}\n{\"tool\":\"Bash\",\"input\":{\"command\":\"echo checked\"}}\n",
-        "{\"tool\":\"Edit\",\"input\":{\"file_path\":\"greet.txt\",\"old_string\":\"wrold\",\"new_string\":\"world\"}}\n",
-        "Fixed the typo in greet.txt.\n",
-    ]);
-    let root = temp_repo();
-    let toml = format!(
-        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\ndialect = \"cc-json\"\n[context]\nbootstrap = false\n"
-    );
-    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
-    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
-    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "fix typo", None, 0, haste::agent::Ctl::default());
-    assert_eq!(rep.final_msg, "Fixed the typo in greet.txt.");
-    assert_eq!(rep.turns, 3);
-    let fixed = std::fs::read_to_string(root.join("greet.txt")).unwrap();
-    assert_eq!(fixed, "hello\nworld\ngoodbye\n");
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
 fn done_with_trailing_commands_is_rescued() {
     // "D let me check\nX echo hi" — the classic misuse: talk then work in one
     // D. Must become S + executed command, run continuing.

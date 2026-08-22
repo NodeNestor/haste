@@ -7,13 +7,6 @@ const GREP_MAX_HITS: usize = 50;
 const GREP_LINE_WINDOW: usize = 200;
 const READ_LINE_MAX: usize = 500;
 
-/// Crude similarity: length of the longest common prefix plus common suffix.
-fn similarity(a: &str, b: &str) -> usize {
-    let pre = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
-    let suf = a.bytes().rev().zip(b.bytes().rev()).take_while(|(x, y)| x == y).count();
-    pre + suf.min(a.len().saturating_sub(pre))
-}
-
 /// UTF-8-boundary-safe truncation with an ellipsis note. The naive
 /// String::truncate panics mid-codepoint.
 pub fn clip(s: &str, max: usize) -> String {
@@ -130,41 +123,6 @@ impl Workspace {
         lines.splice(a - 1..b, new);
         write_lines(&abs, &lines, text.ends_with('\n'))?;
         Ok(region_report(id, &lines, a, nnew))
-    }
-
-    /// Search/replace edit (cc-json dialect). The old string must match
-    /// exactly once; reports the renumbered region like line edits do.
-    pub fn replace(&mut self, target: &str, old: &str, new: &str) -> Result<String, String> {
-        let (id, abs) = self.resolve(target)?;
-        let text = std::fs::read_to_string(&abs).map_err(|e| e.to_string())?;
-        let hits = text.matches(old).count();
-        if hits == 0 {
-            // Diffusion finetunes copy text imperfectly — hand back the REAL
-            // lines nearest their attempt so the retry can copy ground truth.
-            let want = old.lines().next().unwrap_or(old).trim();
-            let lines: Vec<&str> = text.lines().collect();
-            let n_old = old.lines().count().max(1);
-            let best = lines
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, l)| similarity(l.trim(), want))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let hi = (best + n_old + 1).min(lines.len());
-            let mut hint = format!("err: old_string not found in #{id}. Closest actual text (copy EXACTLY):\n");
-            for (i, l) in lines.iter().enumerate().take(hi).skip(best.saturating_sub(1)) {
-                hint.push_str(&format!("{}:{}\n", i + 1, l));
-            }
-            return Err(hint.trim_end().to_string());
-        }
-        if hits > 1 {
-            return Err(format!("old_string matches {hits} times in #{id} — make it unique"));
-        }
-        let start_line = text[..text.find(old).unwrap()].lines().count().max(1);
-        let out = text.replacen(old, new, 1);
-        std::fs::write(&abs, &out).map_err(|e| e.to_string())?;
-        let lines: Vec<String> = out.lines().map(String::from).collect();
-        Ok(region_report(id, &lines, start_line, new.lines().count().max(1)))
     }
 
     /// Insert body after line `after` (0 = top of file).

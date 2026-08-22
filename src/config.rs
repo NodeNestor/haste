@@ -82,12 +82,6 @@ pub struct ModelCfg {
     /// Provider has a token-prefix cache (llama.cpp, vLLM). Selects append mode defaults.
     #[serde(default)]
     pub prefix_cache: bool,
-    /// Command dialect the model speaks: "haste" (the line DSL) or "cc-json"
-    /// (Claude-Code-style {"tool": ..., "input": ...} lines — for models
-    /// finetuned on Claude Code traces, like fable). In cc-json a prose-only
-    /// message ends the run with that text, matching CC semantics.
-    #[serde(default = "d_dialect")]
-    pub dialect: String,
     /// Extra fields merged verbatim into every request body — provider quirks
     /// (e.g. vLLM/Qwen: chat_template_kwargs.enable_thinking = false) live in
     /// config, never in code.
@@ -96,9 +90,6 @@ pub struct ModelCfg {
 }
 fn d_max_tokens() -> u32 {
     2048
-}
-fn d_dialect() -> String {
-    "haste".into()
 }
 
 #[derive(Deserialize, Clone)]
@@ -121,9 +112,6 @@ pub struct CtxCfg {
     /// at the head of the session. Subagents never get one.
     #[serde(default = "d_true")]
     pub bootstrap: bool,
-    /// Runtime: render entries in cc-json transcript style (set from dialect).
-    #[serde(skip, default)]
-    pub cc: bool,
     /// Over-budget handling in append mode: "model" summarizes history with one
     /// prompt-cached model call (the context is already in the provider's KV
     /// cache, so the prefill is ~free); "structural" folds lines mechanically.
@@ -166,7 +154,6 @@ impl Default for CtxCfg {
             max_turns: d_turns(),
             result_cap_chars: d_result_cap(),
             bootstrap: true,
-            cc: false,
             compact: d_compact(),
             compact_keep_last: d_compact_keep(),
         }

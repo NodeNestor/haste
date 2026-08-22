@@ -127,7 +127,7 @@ impl Renderer {
             if text.is_empty() && self.overrides.contains_key(&i) {
                 continue; // entry sealed behind the summary
             }
-            push_entry(&mut out, e.kind, text, cfg.cc);
+            push_entry(&mut out, e.kind, text);
         }
         out
     }
@@ -194,42 +194,12 @@ fn render_working_set(ledger: &Ledger, cfg: &CtxCfg, turn: u32) -> String {
 
     let mut out = String::new();
     for (i, e) in ledger.entries.iter().enumerate() {
-        push_entry(&mut out, e.kind, texts[i].as_deref().unwrap_or(&e.text), cfg.cc);
+        push_entry(&mut out, e.kind, texts[i].as_deref().unwrap_or(&e.text));
     }
     out
 }
 
-fn push_entry(out: &mut String, kind: Kind, text: &str, cc: bool) {
-    if cc {
-        // The transcript style CC-trace finetunes (fable) were trained on.
-        match kind {
-            Kind::Task => {
-                out.push_str("USER: ");
-                out.push_str(text);
-                out.push('\n');
-            }
-            Kind::Pin => {
-                out.push_str(text);
-                out.push('\n');
-            }
-            Kind::Action => {
-                out.push_str("ASSISTANT (tool call) ");
-                out.push_str(text);
-                out.push('\n');
-            }
-            Kind::Result => {
-                out.push_str("TOOL RESULT: ");
-                out.push_str(text);
-                out.push('\n');
-            }
-            Kind::Final => {
-                out.push_str("ASSISTANT (message): ");
-                out.push_str(text);
-                out.push('\n');
-            }
-        }
-        return;
-    }
+fn push_entry(out: &mut String, kind: Kind, text: &str) {
     match kind {
         Kind::Task => {
             out.push_str("## TASK\n");

@@ -27,11 +27,6 @@ pub enum Cmd {
     Say { text: String },
     /// Signature outline of a file or directory (codemap).
     Outline { target: String },
-    /// Search/replace edit (cc-json dialect: the Edit tool's old/new strings).
-    Replace { target: String, old: String, new: String },
-    /// A line that looked like a tool call but failed to parse (cc dialect) —
-    /// must bounce back as an error, never fall through to prose/final.
-    Malformed { line: String },
     Custom { verb: char, args: String },
 }
 
@@ -48,8 +43,6 @@ pub struct Lexer {
     buf: String,
     pending: Option<(Pending, Vec<String>)>,
     done_msg: Option<String>,
-    /// Accept Claude-Code-style {"tool":...,"input":...} lines as commands.
-    cc_json: bool,
 }
 
 impl Default for Lexer {
@@ -60,11 +53,7 @@ impl Default for Lexer {
 
 impl Lexer {
     pub fn new() -> Lexer {
-        Lexer { buf: String::new(), pending: None, done_msg: None, cc_json: false }
-    }
-
-    pub fn new_dialect(cc_json: bool) -> Lexer {
-        Lexer { cc_json, ..Lexer::new() }
+        Lexer { buf: String::new(), pending: None, done_msg: None }
     }
 
     pub fn feed(&mut self, chunk: &str, out: &mut Vec<Cmd>) {
@@ -110,29 +99,6 @@ impl Lexer {
         let line = line.trim_start();
         if line.is_empty() {
             return;
-        }
-        if self.cc_json {
-            // Accept every notation the model produces, including transcript
-            // echoes with diffusion block-glitched prefixes ("ISTANT (tool
-            // call) Edit input={..."): find " input={", the word before it is
-            // the tool name, everything before that is noise.
-            if let Some(idx) = line.find(" input={") {
-                let name = line[..idx].rsplit([' ', ')']).next().unwrap_or("");
-                if !name.is_empty() {
-                    match parse_cc_tool_named(name, &line[idx + 7..]) {
-                        Some(cmd) => out.push(cmd),
-                        None => out.push(Cmd::Malformed { line: line.to_string() }),
-                    }
-                    return;
-                }
-            }
-            if line.starts_with('{') {
-                match parse_cc_tool(line) {
-                    Some(cmd) => out.push(cmd),
-                    None => out.push(Cmd::Malformed { line: line.to_string() }),
-                }
-                return;
-            }
         }
         let mut it = line.splitn(2, ' ');
         let verb = it.next().unwrap_or("");
@@ -212,47 +178,6 @@ impl Lexer {
     }
 }
 
-/// Map a Claude-Code tool call line onto haste commands. Unknown tools are
-/// ignored (the empty-turn nudge handles a message of only unknowns).
-fn parse_cc_tool(line: &str) -> Option<Cmd> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let tool = v["tool"].as_str().or_else(|| v["name"].as_str())?.to_string();
-    let inp = if v["input"].is_object() { v["input"].clone() } else { v["arguments"].clone() };
-    map_cc_tool(&tool, &inp)
-}
-
-/// "Name input={json}" transcript form: the json IS the input object.
-fn parse_cc_tool_named(name: &str, json_part: &str) -> Option<Cmd> {
-    let inp: serde_json::Value = serde_json::from_str(json_part).ok()?;
-    map_cc_tool(name, &inp)
-}
-
-fn map_cc_tool(tool: &str, inp: &serde_json::Value) -> Option<Cmd> {
-    let s = |k: &str| inp[k].as_str().map(str::to_string);
-    match tool {
-        "Bash" => Some(Cmd::Exec { line: s("command")? }),
-        "Read" => {
-            let target = s("file_path").or_else(|| s("path"))?;
-            let range = match (inp["offset"].as_u64(), inp["limit"].as_u64()) {
-                (Some(o), Some(l)) => Some((o as usize, (o + l - 1) as usize)),
-                (Some(o), None) => Some((o as usize, usize::MAX / 2)),
-                _ => None,
-            };
-            Some(Cmd::Read { target, range })
-        }
-        "Write" => Some(Cmd::New { path: s("file_path").or_else(|| s("path"))?, body: s("content")? }),
-        "Edit" => Some(Cmd::Replace {
-            target: s("file_path").or_else(|| s("path"))?,
-            old: s("old_string")?,
-            new: s("new_string")?,
-        }),
-        "Grep" => Some(Cmd::Grep { pat: s("pattern")?, target: s("path") }),
-        "Glob" => Some(Cmd::Grep { pat: s("pattern")?, target: s("path") }),
-        "Task" => Some(Cmd::Agent { profile: "researcher".into(), task: s("prompt")? }),
-        _ => None,
-    }
-}
-
 fn close_payload(p: Pending, body: Vec<String>) -> Cmd {
     let body = body.join("\n");
     match p {
@@ -317,23 +242,6 @@ mod tests {
             Cmd::Edit { target: "2".into(), a: 5, b: 6, body: "let x = 1;\n.hidden".into() }
         );
         assert_eq!(cmds[1], Cmd::Done { msg: "fixed".into() });
-    }
-
-    #[test]
-    fn cc_dialect_accepts_all_three_notations() {
-        let mut lx = Lexer::new_dialect(true);
-        let mut out = Vec::new();
-        lx.feed(
-            "{\"tool\":\"Bash\",\"input\":{\"command\":\"ls\"}}\n\
-             ASSISTANT (tool call) Read input={\"file_path\":\"a.py\"}\n\
-             Grep input={\"pattern\":\"foo\"}\n",
-            &mut out,
-        );
-        lx.finish(&mut out);
-        assert_eq!(out.len(), 3, "{out:?}");
-        assert_eq!(out[0], Cmd::Exec { line: "ls".into() });
-        assert_eq!(out[1], Cmd::Read { target: "a.py".into(), range: None });
-        assert_eq!(out[2], Cmd::Grep { pat: "foo".into(), target: None });
     }
 
     #[test]
