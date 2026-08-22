@@ -7,6 +7,13 @@ const GREP_MAX_HITS: usize = 50;
 const GREP_LINE_WINDOW: usize = 200;
 const READ_LINE_MAX: usize = 500;
 
+/// Crude similarity: length of the longest common prefix plus common suffix.
+fn similarity(a: &str, b: &str) -> usize {
+    let pre = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    let suf = a.bytes().rev().zip(b.bytes().rev()).take_while(|(x, y)| x == y).count();
+    pre + suf.min(a.len().saturating_sub(pre))
+}
+
 /// UTF-8-boundary-safe truncation with an ellipsis note. The naive
 /// String::truncate panics mid-codepoint.
 pub fn clip(s: &str, max: usize) -> String {
@@ -132,7 +139,23 @@ impl Workspace {
         let text = std::fs::read_to_string(&abs).map_err(|e| e.to_string())?;
         let hits = text.matches(old).count();
         if hits == 0 {
-            return Err(format!("old_string not found in #{id}"));
+            // Diffusion finetunes copy text imperfectly — hand back the REAL
+            // lines nearest their attempt so the retry can copy ground truth.
+            let want = old.lines().next().unwrap_or(old).trim();
+            let lines: Vec<&str> = text.lines().collect();
+            let n_old = old.lines().count().max(1);
+            let best = lines
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, l)| similarity(l.trim(), want))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let hi = (best + n_old + 1).min(lines.len());
+            let mut hint = format!("err: old_string not found in #{id}. Closest actual text (copy EXACTLY):\n");
+            for (i, l) in lines.iter().enumerate().take(hi).skip(best.saturating_sub(1)) {
+                hint.push_str(&format!("{}:{}\n", i + 1, l));
+            }
+            return Err(hint.trim_end().to_string());
         }
         if hits > 1 {
             return Err(format!("old_string matches {hits} times in #{id} — make it unique"));

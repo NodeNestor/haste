@@ -109,22 +109,21 @@ impl Lexer {
             return;
         }
         if self.cc_json {
-            // Accept the model echoing transcript notation back at us:
-            //   ASSISTANT (tool call) Bash input={...}   |   Name input={...}   |   {...}
-            let l2 = line
-                .strip_prefix("ASSISTANT (tool call)")
-                .map(str::trim_start)
-                .unwrap_or(line);
-            if let Some((name, rest)) = l2.split_once(" input=") {
-                if rest.trim_start().starts_with('{') && !name.contains(' ') {
-                    if let Some(cmd) = parse_cc_tool_named(name, rest.trim_start()) {
+            // Accept every notation the model produces, including transcript
+            // echoes with diffusion block-glitched prefixes ("ISTANT (tool
+            // call) Edit input={..."): find " input={", the word before it is
+            // the tool name, everything before that is noise.
+            if let Some(idx) = line.find(" input={") {
+                let name = line[..idx].rsplit([' ', ')']).next().unwrap_or("");
+                if !name.is_empty() {
+                    if let Some(cmd) = parse_cc_tool_named(name, &line[idx + 7..]) {
                         out.push(cmd);
                     }
                     return;
                 }
             }
-            if l2.starts_with('{') {
-                if let Some(cmd) = parse_cc_tool(l2) {
+            if line.starts_with('{') {
+                if let Some(cmd) = parse_cc_tool(line) {
                     out.push(cmd);
                 }
                 return;
