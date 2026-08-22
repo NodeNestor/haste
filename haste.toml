@@ -4,7 +4,7 @@
 base_url = "http://127.0.0.1:18081/v1"   # Qwen3.8-27B-FP8 on vLLM
 model = "q38"
 # api_key_env = "CEREBRAS_API_KEY"
-max_tokens = 2048
+max_tokens = 8192                         # big files must fit in one payload; cuts trigger rewrite loops
 temperature = 0.7                         # temp 0 makes Qwen FP8 degenerate into !!!! spam
 prefix_cache = true                       # llama.cpp/vLLM: true, Cerebras: false
 

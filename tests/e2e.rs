@@ -45,6 +45,11 @@ fn mock_server(scripts: Vec<&'static str>) -> u16 {
             }
             let msg = scripts.get(i).copied().unwrap_or("D out of script\n");
             i += 1;
+            // "LENGTH:" prefix simulates a max_tokens-guillotined stream.
+            let (msg, fr) = match msg.strip_prefix("LENGTH:") {
+                Some(m) => (m, "length"),
+                None => (msg, "stop"),
+            };
             let mut resp = String::from(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
             );
@@ -55,6 +60,8 @@ fn mock_server(scripts: Vec<&'static str>) -> u16 {
                 let ev = serde_json::json!({"choices":[{"delta":{"content":piece}}]});
                 resp.push_str(&format!("data: {ev}\n\n"));
             }
+            let fin = serde_json::json!({"choices":[{"delta":{}, "finish_reason": fr}]});
+            resp.push_str(&format!("data: {fin}\n\n"));
             resp.push_str("data: [DONE]\n\n");
             let _ = s.write_all(resp.as_bytes());
         }
@@ -179,6 +186,38 @@ fn event_stream_feeds_a_ui() {
         matches!(evs.last(), Some(Ev::Done(m)) if m == "looked"),
         "Done must be last"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn length_cap_writes_partial_and_tells_model_to_continue() {
+    let port = mock_server(vec![
+        // Payload guillotined mid-file: no "." terminator, finish_reason=length.
+        "LENGTH:N page.html\n<!DOCTYPE html>\n<body>",
+        // Model follows the note and continues instead of rewriting.
+        "I 0 2\n</body>\n.\nD finished the page\n",
+    ]);
+    let root = temp_repo();
+    let cfg = Arc::new(cfg_for(port));
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "make page", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "finished the page");
+    assert!(
+        session.ledger.entries.iter().any(|e| e.text.contains("hit the max_tokens limit")),
+        "continuation note missing"
+    );
+    let page = std::fs::read_to_string(root.join("page.html")).unwrap();
+    assert_eq!(page, "<!DOCTYPE html>\n<body>\n</body>\n");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn empty_done_is_not_max_turns() {
+    let port = mock_server(vec!["D\n"]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "cool", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "done.");
+    assert_eq!(rep.turns, 1);
     let _ = std::fs::remove_dir_all(root);
 }
 

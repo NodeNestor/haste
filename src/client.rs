@@ -13,6 +13,8 @@ pub struct StreamStats {
     pub ttft_ms: u128,
     pub total_ms: u128,
     pub out_chars: usize,
+    /// "length" means the output was guillotined by max_tokens mid-message.
+    pub finish_reason: Option<String>,
 }
 
 impl Client {
@@ -72,6 +74,7 @@ impl Client {
         let resp = self.post(&body)?;
         let mut ttft: Option<u128> = None;
         let mut out_chars = 0usize;
+        let mut finish_reason: Option<String> = None;
         let reader = BufReader::new(resp.into_reader());
         for line in reader.lines() {
             let line = line.map_err(|e| format!("stream read: {e}"))?;
@@ -80,6 +83,9 @@ impl Client {
                 break;
             }
             let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+            if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
+                finish_reason = Some(fr.to_string());
+            }
             if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
                 if !delta.is_empty() {
                     ttft.get_or_insert_with(|| t0.elapsed().as_millis());
@@ -92,6 +98,7 @@ impl Client {
             ttft_ms: ttft.unwrap_or_else(|| t0.elapsed().as_millis()),
             total_ms: t0.elapsed().as_millis(),
             out_chars,
+            finish_reason,
         })
     }
 

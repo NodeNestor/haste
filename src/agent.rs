@@ -148,11 +148,13 @@ pub fn run_session(
             }
             lexer.feed(delta, &mut cmds);
         });
+        let mut length_capped = false;
         match stream_res {
             Ok(s) => {
                 rep.model_ms += s.total_ms;
                 rep.ttft_ms_sum += s.ttft_ms;
                 rep.out_chars += s.out_chars;
+                length_capped = s.finish_reason.as_deref() == Some("length");
             }
             Err(e) => {
                 ledger.push(Kind::Result, turn, format!("model error: {e}"), None);
@@ -245,8 +247,15 @@ pub fn run_session(
         }
         rep.tool_ms += t_tools.elapsed().as_millis();
 
+        if length_capped {
+            let note = "(your output hit the max_tokens limit mid-message — any cut-off file was written PARTIALLY. Read it, then CONTINUE it with I <id> <last-line> or E; do NOT rewrite it from scratch)";
+            ctl.emit(Ev::Result(depth, note.into()));
+            ledger.push(Kind::Result, turn, note.into(), None);
+        }
+
         if let Some(msg) = done {
             let msg = clean_final(&msg);
+            let msg = if msg.is_empty() { "done.".to_string() } else { msg };
             ledger.push(Kind::Final, turn, msg.clone(), None);
             rep.final_msg = msg;
             break;
