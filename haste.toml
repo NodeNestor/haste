@@ -1,4 +1,4 @@
-# haste — everything moddable lives here. The binary never changes.
+﻿# haste — everything moddable lives here. The binary never changes.
 
 [model]
 base_url = "http://127.0.0.1:18081/v1"   # Qwen3.8-27B-FP8 on vLLM
@@ -40,17 +40,22 @@ desc = "fetch a URL (distilled to task-relevant facts)"
 cmd = "curl -sL --max-time 20 {args}"
 prune = "drop:^\\s*<|distill"
 
+[tool.P]
+desc = "screenshot the screen to shot.png (then V shot.png to see it)"
+cmd = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $bmp.Save('shot.png'); 'shot.png saved'"
+timeout_ms = 20000
+
 # ---- subagent profiles ----
 
 [profile.researcher]
 system = "You research. Gather facts fast, never edit files. Your D message is a terse brief of findings."
-tools = "RGXW"
+tools = "RGXWVP"
 max_turns = 0
 budget_tokens = 8000
 
 [profile.fixer]
 system = "You fix exactly the issue in the task. Verify with C/T before D."
-tools = "REIGNXTC"
+tools = "REIGNXTCV"
 max_turns = 0
 budget_tokens = 10000
 

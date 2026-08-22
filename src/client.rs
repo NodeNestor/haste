@@ -53,12 +53,27 @@ impl Client {
 
     /// Stream a completion; `on_delta` fires per content chunk so the caller
     /// can lex and execute commands while generation is still in flight.
+    /// `images`: (mime, base64) pairs appended after the text — the text stays
+    /// first so the provider's prefix cache keeps matching image-free turns.
     pub fn stream(
         &self,
         system: &str,
         user: &str,
+        images: &[(String, String)],
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<StreamStats, String> {
+        let user_content: Value = if images.is_empty() {
+            Value::String(user.to_string())
+        } else {
+            let mut parts = vec![json!({"type": "text", "text": user})];
+            for (mime, b64) in images {
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {"url": format!("data:{mime};base64,{b64}")}
+                }));
+            }
+            Value::Array(parts)
+        };
         let mut body = json!({
             "model": self.cfg.model,
             "max_tokens": self.cfg.max_tokens,
@@ -66,7 +81,7 @@ impl Client {
             "stream": true,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "user", "content": user_content},
             ],
         });
         self.merge_extra(&mut body);

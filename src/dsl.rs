@@ -21,6 +21,8 @@ pub enum Cmd {
     Exec { line: String },
     Agent { profile: String, task: String },
     Done { msg: String },
+    /// View an image file: attached to the next model request.
+    View { target: String },
     Custom { verb: char, args: String },
 }
 
@@ -140,6 +142,11 @@ impl Lexer {
                 let task = p.next().unwrap_or("").trim().to_string();
                 if !profile.is_empty() && !task.is_empty() {
                     out.push(Cmd::Agent { profile, task });
+                }
+            }
+            'V' => {
+                if !rest.is_empty() {
+                    out.push(Cmd::View { target: rest.to_string() });
                 }
             }
             'D' => {

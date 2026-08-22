@@ -258,6 +258,22 @@ fn length_cap_writes_partial_and_tells_model_to_continue() {
 }
 
 #[test]
+fn view_attaches_image_for_next_turn() {
+    let port = mock_server(vec!["V pic.png\n", "D saw it\n"]);
+    let root = temp_repo();
+    std::fs::write(root.join("pic.png"), [0x89u8, 0x50, 0x4E, 0x47, 1, 2, 3, 4]).unwrap();
+    let cfg = Arc::new(cfg_for(port));
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "look at pic", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "saw it");
+    assert!(
+        session.ledger.entries.iter().any(|e| e.text.contains("attached") && e.text.contains("SEE")),
+        "attach note missing"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn duplicate_subagent_spawns_are_refused() {
     let sub_turn = if cfg!(windows) { "X powershell -Command Start-Sleep -Milliseconds 900\nD sub done\n" } else { "X sleep 1\nD sub done\n" };
     let parent_t1 = if cfg!(windows) {

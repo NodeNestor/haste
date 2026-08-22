@@ -120,6 +120,9 @@ pub fn run_session(
     let mut rep = Report::default();
     let mut empty_turns = 0u32;
     let mut degens = 0u32;
+    // Images queued by V: attached to exactly the next request, then dropped —
+    // the model sees them once and can V again if it needs another look.
+    let mut images: Vec<(String, String)> = Vec::new();
     let base = session.turn_base;
     // Background subagents: spawned here, never blocking a turn. Finished ones
     // are harvested at the top of each turn; D waits for stragglers.
@@ -184,7 +187,7 @@ pub fn run_session(
                  findings and decisions, remaining steps, and pitfalls already hit. Output only the briefing.\n"
             );
             let mut summary = String::new();
-            if let Ok(s) = client.stream(&system, &cuser, &mut |d| summary.push_str(d)) {
+            if let Ok(s) = client.stream(&system, &cuser, &[], &mut |d| summary.push_str(d)) {
                 rep.model_ms += s.total_ms;
                 let summary = clean_final(summary.trim());
                 if !summary.is_empty() {
@@ -204,9 +207,10 @@ pub fn run_session(
         rep.render_us += t_r.elapsed().as_micros();
         rep.sent_tokens += est_tokens(&system) + est_tokens(&user);
 
+        let turn_images = std::mem::take(&mut images);
         let mut lexer = Lexer::new();
         let mut cmds: Vec<Cmd> = Vec::new();
-        let stream_res = client.stream(&system, &user, &mut |delta| {
+        let stream_res = client.stream(&system, &user, &turn_images, &mut |delta| {
             if depth == 0 {
                 ctl.emit(Ev::Delta(delta.to_string()));
             }
@@ -278,6 +282,20 @@ pub fn run_session(
             }
             match cmd {
                 Cmd::Done { msg } => done = Some(msg),
+                Cmd::View { target } => {
+                    let act = format!("V {target}");
+                    ctl.emit(Ev::Action(depth, act.clone()));
+                    ledger.push(Kind::Action, turn, act, None);
+                    let result = match ws.load_image(&target) {
+                        Ok((id, mime, b64, bytes)) => {
+                            images.push((mime, b64));
+                            format!("(image #{id} attached — you will SEE it in the next turn; {}KB)", bytes / 1024)
+                        }
+                        Err(e) => format!("err: {e}"),
+                    };
+                    ctl.emit(Ev::Result(depth, result.clone()));
+                    ledger.push(Kind::Result, turn, result, None);
+                }
                 Cmd::Agent { profile, task } => {
                     if depth >= 2 {
                         ledger.push(Kind::Result, turn, "subagent depth limit reached".into(), None);
@@ -447,6 +465,7 @@ fn verb_of(cmd: &Cmd) -> char {
         Cmd::Exec { .. } => 'X',
         Cmd::Agent { .. } => 'A',
         Cmd::Done { .. } => 'D',
+        Cmd::View { .. } => 'V',
         Cmd::Custom { verb, .. } => *verb,
     }
 }
@@ -468,6 +487,7 @@ fn action_of(cmd: &Cmd) -> String {
         Cmd::Custom { verb, args } => format!("{verb} {args}"),
         Cmd::Agent { profile, task } => format!("A {profile} {task}"),
         Cmd::Done { .. } => "D".into(),
+        Cmd::View { target } => format!("V {target}"),
     }
 }
 
@@ -555,7 +575,7 @@ fn exec_one(
                 None => (act, format!("err: unknown verb {verb}"), None),
             }
         }
-        Cmd::Agent { .. } | Cmd::Done { .. } => unreachable!("handled by caller"),
+        Cmd::Agent { .. } | Cmd::Done { .. } | Cmd::View { .. } => unreachable!("handled by caller"),
     };
     ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&result, 3), 400)));
     ledger.push(Kind::Action, turn, action, None);
@@ -600,6 +620,7 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     if allow('N') { s.push_str("N <path>            create file; content follows, end \".\"\n"); }
     if allow('G') { s.push_str("G <regex> [id|path] search files, results as #id:line:text\n"); }
     if allow('X') { s.push_str("X <command>         run shell command in the repo root\n"); }
+    if allow('V') { s.push_str("V <id|path>         view an image file (png/jpg/webp/gif) — you SEE it in the next turn\n"); }
     if allow('A') && !cfg.profile.is_empty() {
         let names: Vec<&str> = cfg.profile.keys().map(String::as_str).collect();
         s.push_str(&format!(

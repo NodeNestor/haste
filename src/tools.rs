@@ -231,6 +231,33 @@ impl Workspace {
         Ok(out)
     }
 
+    /// Load an image for attaching to the next model request.
+    pub fn load_image(&mut self, target: &str) -> Result<(u32, String, String, usize), String> {
+        const MAX_IMAGE_BYTES: u64 = 6_000_000;
+        let (id, abs) = self.resolve(target)?;
+        let ext = abs
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        let mime = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            "bmp" => "image/bmp",
+            _ => return Err(format!("not an image file: {target} (.{ext})")),
+        };
+        let len = abs.metadata().map_err(|e| e.to_string())?.len();
+        if len > MAX_IMAGE_BYTES {
+            return Err(format!("image too large: {len} bytes (max {MAX_IMAGE_BYTES})"));
+        }
+        let bytes = std::fs::read(&abs).map_err(|e| e.to_string())?;
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok((id, mime.to_string(), b64, bytes.len()))
+    }
+
     /// Map of intern ids -> paths, for the prompt header.
     pub fn legend(&self) -> String {
         if self.files.is_empty() {
