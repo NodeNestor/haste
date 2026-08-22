@@ -1,0 +1,52 @@
+# haste — everything moddable lives here. The binary never changes.
+
+[model]
+base_url = "http://127.0.0.1:18080/v1"   # <- swap for your test endpoint / Cerebras
+model = "nodenestor/smart"
+# api_key_env = "CEREBRAS_API_KEY"
+max_tokens = 2048
+temperature = 0.0
+prefix_cache = true                       # llama.cpp/vLLM: true, Cerebras: false
+
+[context]
+mode = "append"          # "append" (prefix-cache friendly) | "working_set" (max compression)
+budget_tokens = 16000
+fold_after_turns = 6     # working_set: tool results older than this collapse to one line
+max_turns = 60
+result_cap_chars = 12000
+
+# ---- config-declared tools: one uppercase verb (outside REIGNXAD) each ----
+
+[tool.T]
+desc = "run tests (first failure only)"
+cmd = "cargo test {args}"
+prune = "first_failure"
+timeout_ms = 180000
+
+[tool.C]
+desc = "typecheck"
+cmd = "cargo check --message-format short {args}"
+prune = "errors_only|head_tail:30,5"
+
+[tool.W]
+desc = "fetch a URL (distilled to task-relevant facts)"
+cmd = "curl -sL --max-time 20 {args}"
+prune = "drop:^\\s*<|distill"
+
+# ---- subagent profiles ----
+
+[profile.researcher]
+system = "You research. Gather facts fast, never edit files. Your D message is a terse brief of findings."
+tools = "RGXW"
+max_turns = 15
+budget_tokens = 8000
+
+[profile.fixer]
+system = "You fix exactly the issue in the task. Verify with C/T before D."
+tools = "REIGNXTC"
+max_turns = 25
+budget_tokens = 10000
+
+[distill]
+max_tokens = 400
+# prompt = "Extract only the facts relevant to the task below. Terse bullet lines, no prose. TASK: {task}\n---\n{text}"

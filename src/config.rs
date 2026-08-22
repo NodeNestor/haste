@@ -1,0 +1,175 @@
+use serde::Deserialize;
+use std::collections::BTreeMap;
+
+/// Verbs implemented natively in the binary. Config tools must not shadow these.
+pub const NATIVE_VERBS: &str = "REIGNXAD";
+
+#[derive(Deserialize, Clone)]
+pub struct Config {
+    pub model: ModelCfg,
+    #[serde(default)]
+    pub context: CtxCfg,
+    #[serde(default)]
+    pub tool: BTreeMap<String, ToolCfg>,
+    #[serde(default)]
+    pub profile: BTreeMap<String, ProfileCfg>,
+    #[serde(default)]
+    pub distill: DistillCfg,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct ModelCfg {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default = "d_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub temperature: f32,
+    /// Provider has a token-prefix cache (llama.cpp, vLLM). Selects append mode defaults.
+    #[serde(default)]
+    pub prefix_cache: bool,
+}
+fn d_max_tokens() -> u32 {
+    2048
+}
+
+#[derive(Deserialize, Clone)]
+pub struct CtxCfg {
+    /// "working_set": re-render aggressively every turn (no provider cache).
+    /// "append": prefix-stable; folding only ever touches the tail at reseal.
+    #[serde(default = "d_mode")]
+    pub mode: String,
+    #[serde(default = "d_budget")]
+    pub budget_tokens: usize,
+    /// Tool results older than this many turns collapse to their first line.
+    #[serde(default = "d_fold")]
+    pub fold_after_turns: u32,
+    #[serde(default = "d_turns")]
+    pub max_turns: u32,
+    /// Cap on any single tool result, applied before pruners (chars).
+    #[serde(default = "d_result_cap")]
+    pub result_cap_chars: usize,
+}
+fn d_mode() -> String {
+    "working_set".into()
+}
+fn d_budget() -> usize {
+    16_000
+}
+fn d_fold() -> u32 {
+    6
+}
+fn d_turns() -> u32 {
+    60
+}
+fn d_result_cap() -> usize {
+    12_000
+}
+impl Default for CtxCfg {
+    fn default() -> Self {
+        Self {
+            mode: d_mode(),
+            budget_tokens: d_budget(),
+            fold_after_turns: d_fold(),
+            max_turns: d_turns(),
+            result_cap_chars: d_result_cap(),
+        }
+    }
+}
+
+/// A config-declared tool: one DSL verb -> one shell command template.
+#[derive(Deserialize, Clone)]
+pub struct ToolCfg {
+    pub desc: String,
+    pub cmd: String,
+    /// head_tail:A,B | first_failure | errors_only | drop:REGEX | keep:REGEX | distill | none
+    /// Chain with '|', e.g. "drop:^warning\\b|head_tail:30,10"
+    #[serde(default)]
+    pub prune: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct ProfileCfg {
+    pub system: String,
+    /// Verb letters this profile may use, e.g. "RGXW".
+    #[serde(default = "d_ptools")]
+    pub tools: String,
+    #[serde(default = "d_pturns")]
+    pub max_turns: u32,
+    #[serde(default = "d_pbudget")]
+    pub budget_tokens: usize,
+}
+fn d_ptools() -> String {
+    "RGXD".into()
+}
+fn d_pturns() -> u32 {
+    20
+}
+fn d_pbudget() -> usize {
+    8_000
+}
+
+#[derive(Deserialize, Clone)]
+pub struct DistillCfg {
+    #[serde(default = "d_dprompt")]
+    pub prompt: String,
+    #[serde(default = "d_dmax")]
+    pub max_tokens: u32,
+}
+fn d_dprompt() -> String {
+    "Extract only the facts relevant to the task below. Terse bullet lines, no prose. \
+     TASK: {task}\n---\n{text}"
+        .into()
+}
+fn d_dmax() -> u32 {
+    400
+}
+impl Default for DistillCfg {
+    fn default() -> Self {
+        Self {
+            prompt: d_dprompt(),
+            max_tokens: d_dmax(),
+        }
+    }
+}
+
+pub const DEFAULT_TOML: &str = r#"
+[model]
+base_url = "http://127.0.0.1:8000/v1"
+model = "default"
+"#;
+
+impl Config {
+    pub fn load(path: Option<&str>) -> Result<Config, String> {
+        let text = match path {
+            Some(p) => std::fs::read_to_string(p).map_err(|e| format!("config {p}: {e}"))?,
+            None => match std::fs::read_to_string("haste.toml") {
+                Ok(t) => t,
+                Err(_) => DEFAULT_TOML.to_string(),
+            },
+        };
+        let cfg: Config = toml::from_str(&text).map_err(|e| format!("config parse: {e}"))?;
+        for verb in cfg.tool.keys() {
+            let ok = verb.len() == 1
+                && verb.chars().next().unwrap().is_ascii_uppercase()
+                && !NATIVE_VERBS.contains(verb.as_str());
+            if !ok {
+                return Err(format!(
+                    "tool verb '{verb}' must be a single uppercase letter outside {NATIVE_VERBS}"
+                ));
+            }
+        }
+        Ok(cfg)
+    }
+
+    pub fn api_key(&self) -> Option<String> {
+        self.model
+            .api_key_env
+            .as_deref()
+            .and_then(|v| std::env::var(v).ok())
+    }
+}
