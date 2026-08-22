@@ -26,8 +26,9 @@ impl Workspace {
         (self.files.len() - 1) as u32
     }
 
-    /// Target is either an intern id ("3") or a path (interned on first use).
+    /// Target is either an intern id ("3" or "#3") or a path (interned on first use).
     pub fn resolve(&mut self, target: &str) -> Result<(u32, PathBuf), String> {
+        let target = target.strip_prefix('#').unwrap_or(target);
         if let Ok(id) = target.parse::<u32>() {
             let rel = self
                 .files
@@ -381,6 +382,14 @@ mod tests {
         w.edit("0", 1, 1, "").unwrap();
         let r = w.read("0", Some((1, 1))).unwrap();
         assert!(r.contains("1:one"));
+    }
+
+    #[test]
+    fn resolve_accepts_hash_ids() {
+        let (mut w, _td) = ws();
+        w.read("a.txt", None).unwrap();
+        assert!(w.read("#0", Some((1, 1))).unwrap().contains("1:one"));
+        assert!(w.edit("#0", 1, 1, "ONE").is_ok());
     }
 
     #[test]

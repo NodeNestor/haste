@@ -24,6 +24,16 @@ impl Client {
         Client { cfg, key, agent }
     }
 
+    fn merge_extra(&self, body: &mut Value) {
+        if let (Some(extra), Some(obj)) = (&self.cfg.extra_body, body.as_object_mut()) {
+            for (k, v) in extra {
+                if let Ok(jv) = serde_json::to_value(v) {
+                    obj.insert(k.clone(), jv);
+                }
+            }
+        }
+    }
+
     fn post(&self, body: &Value) -> Result<ureq::Response, String> {
         let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
         let mut req = self.agent.post(&url).set("Content-Type", "application/json");
@@ -47,7 +57,7 @@ impl Client {
         user: &str,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<StreamStats, String> {
-        let body = json!({
+        let mut body = json!({
             "model": self.cfg.model,
             "max_tokens": self.cfg.max_tokens,
             "temperature": self.cfg.temperature,
@@ -57,6 +67,7 @@ impl Client {
                 {"role": "user", "content": user},
             ],
         });
+        self.merge_extra(&mut body);
         let t0 = Instant::now();
         let resp = self.post(&body)?;
         let mut ttft: Option<u128> = None;
@@ -86,12 +97,13 @@ impl Client {
 
     /// Non-streaming call, used by the distiller.
     pub fn complete(&self, prompt: &str, max_tokens: u32) -> Result<String, String> {
-        let body = json!({
+        let mut body = json!({
             "model": self.cfg.model,
             "max_tokens": max_tokens,
             "temperature": 0.0,
             "messages": [{"role": "user", "content": prompt}],
         });
+        self.merge_extra(&mut body);
         let resp = self.post(&body)?;
         let v: Value = resp.into_json().map_err(|e| format!("bad json: {e}"))?;
         v["choices"][0]["message"]["content"]

@@ -293,10 +293,14 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     }
     s.push_str("D <message>         done; message is your final report (may span lines to end of message)\n");
     s.push_str(
-        "Rules: files get ids (#0,#1..) listed in the files: header — always use ids once assigned. \
+        "Rules: files get ids (#0,#1..) listed in the files: header — refer to them by id (with or without #). \
          In E/I/N content, a line that must start with \".\" gets one extra \".\" prefix. \
          Batch independent commands in one message. Results arrive in the next message. \
-         Verify edits by running checks/tests. Be terse.\n",
+         Verify edits by running checks/tests. Be terse.\n\
+         Example message (nothing but commands):\n\
+         R config.py\n\
+         G \"load_cfg\" src\n\
+         X python tests.py\n",
     );
     s
 }

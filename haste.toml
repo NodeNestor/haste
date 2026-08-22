@@ -1,12 +1,15 @@
 # haste — everything moddable lives here. The binary never changes.
 
 [model]
-base_url = "http://127.0.0.1:18080/v1"   # <- swap for your test endpoint / Cerebras
-model = "nodenestor/smart"
+base_url = "http://127.0.0.1:18081/v1"   # Qwen3.8-27B-FP8 on vLLM
+model = "q38"
 # api_key_env = "CEREBRAS_API_KEY"
 max_tokens = 2048
 temperature = 0.0
 prefix_cache = true                       # llama.cpp/vLLM: true, Cerebras: false
+
+[model.extra_body.chat_template_kwargs]
+enable_thinking = false                   # no reasoning — iterate, don't deliberate
 
 [context]
 mode = "append"          # "append" (prefix-cache friendly) | "working_set" (max compression)

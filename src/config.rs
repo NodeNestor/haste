@@ -30,6 +30,11 @@ pub struct ModelCfg {
     /// Provider has a token-prefix cache (llama.cpp, vLLM). Selects append mode defaults.
     #[serde(default)]
     pub prefix_cache: bool,
+    /// Extra fields merged verbatim into every request body — provider quirks
+    /// (e.g. vLLM/Qwen: chat_template_kwargs.enable_thinking = false) live in
+    /// config, never in code.
+    #[serde(default)]
+    pub extra_body: Option<toml::value::Table>,
 }
 fn d_max_tokens() -> u32 {
     2048
