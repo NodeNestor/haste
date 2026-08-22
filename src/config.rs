@@ -56,6 +56,13 @@ pub struct CtxCfg {
     /// Cap on any single tool result, applied before pruners (chars).
     #[serde(default = "d_result_cap")]
     pub result_cap_chars: usize,
+    /// Pin a workspace orientation block (project kind, git state, dir map)
+    /// at the head of the session. Subagents never get one.
+    #[serde(default = "d_true")]
+    pub bootstrap: bool,
+}
+fn d_true() -> bool {
+    true
 }
 fn d_mode() -> String {
     "working_set".into()
@@ -80,6 +87,7 @@ impl Default for CtxCfg {
             fold_after_turns: d_fold(),
             max_turns: d_turns(),
             result_cap_chars: d_result_cap(),
+            bootstrap: true,
         }
     }
 }

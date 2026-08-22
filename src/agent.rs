@@ -37,6 +37,9 @@ pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, d
 
     let tee = (depth == 0).then(|| root.join(".haste").join("ledger.jsonl"));
     let mut ledger = Ledger::new(tee.as_deref());
+    if depth == 0 && cfg.context.bootstrap {
+        ledger.push(Kind::Pin, 0, crate::bootstrap::workspace_state(&root), None);
+    }
     ledger.push(Kind::Task, 0, task.to_string(), None);
     let mut ws = Workspace::new(root.clone());
     let mut renderer = Renderer::new();

@@ -148,6 +148,10 @@ fn push_entry(out: &mut String, kind: Kind, text: &str) {
             out.push_str(text);
             out.push_str("\n");
         }
+        Kind::Pin => {
+            out.push_str(text);
+            out.push('\n');
+        }
         Kind::Final => {
             out.push_str("DONE: ");
             out.push_str(text);

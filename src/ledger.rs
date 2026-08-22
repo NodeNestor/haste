@@ -5,6 +5,9 @@ use std::io::Write;
 #[derive(Clone, Copy, PartialEq, Serialize, Debug)]
 pub enum Kind {
     Task,
+    /// Pinned context (workspace orientation): rendered verbatim, never folded,
+    /// never dropped by any budget pass.
+    Pin,
     Action,
     Result,
     Final,

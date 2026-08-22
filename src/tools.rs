@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 const GREP_MAX_HITS: usize = 50;
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".haste", "__pycache__", "dist", ".venv"];
+pub const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".haste", "__pycache__", "dist", ".venv"];
 
 /// The workspace: root dir + the file intern table. Paths are token sinks, so
 /// after first contact every file is a small integer (#3) in both directions.
