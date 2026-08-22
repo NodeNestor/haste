@@ -1,0 +1,13 @@
+name = "mcp"
+prompt = """
+MCP servers are available via M. 'M list <server>' shows a server's tools; 'M call <server> <tool> key=value ...' calls one (values: strings, numbers, true/false; JSON object also accepted). Configured servers: fs (filesystem).
+"""
+
+[env]
+MCP_SERVERS = '{"fs": "npx -y @modelcontextprotocol/server-filesystem C:/work"}'
+
+[tool.M]
+desc = "MCP connector: M list <server> | M call <server> <tool> key=value ..."
+cmd = "python {mod}/bridge.py {args}"
+prune = "head_tail:60,10"
+timeout_ms = 180000

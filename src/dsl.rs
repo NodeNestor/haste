@@ -25,6 +25,8 @@ pub enum Cmd {
     View { target: String },
     /// Say something to the user without ending the run.
     Say { text: String },
+    /// Signature outline of a file or directory (codemap).
+    Outline { target: String },
     Custom { verb: char, args: String },
 }
 
@@ -161,6 +163,9 @@ impl Lexer {
                 if !rest.is_empty() {
                     out.push(Cmd::Say { text: rest.to_string() });
                 }
+            }
+            'O' => {
+                out.push(Cmd::Outline { target: rest.to_string() });
             }
             'D' => {
                 self.done_msg = Some(rest.to_string());

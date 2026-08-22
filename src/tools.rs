@@ -236,6 +236,65 @@ impl Workspace {
         Ok(out)
     }
 
+    /// O verb: signature outline of one file, or of every code file directly
+    /// in a directory (the codemap mode), capped so it can't flood context.
+    pub fn outline(&mut self, target: &str) -> Result<String, String> {
+        const MAX_LINES: usize = 300;
+        // Directory: map each code file at that level.
+        let as_dir = if target.is_empty() { Some(self.root.clone()) } else {
+            let p = self.root.join(target.replace('\\', "/"));
+            p.is_dir().then_some(p)
+        };
+        if let Some(dir) = as_dir {
+            let mut out = String::new();
+            let mut lines = 0usize;
+            let mut entries: Vec<_> = std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten().collect();
+            entries.sort_by_key(|e| e.file_name());
+            for e in entries {
+                let p = e.path();
+                let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+                if !p.is_file() || !crate::outline::is_code_ext(ext) {
+                    continue;
+                }
+                if lines >= MAX_LINES {
+                    out.push_str("…(outline capped — O individual files for the rest)\n");
+                    break;
+                }
+                let rel = p.strip_prefix(&self.root).unwrap_or(&p).to_path_buf();
+                let id = self.intern(&rel);
+                let text = std::fs::read_to_string(&p).unwrap_or_default();
+                let total = text.lines().count();
+                if let Some(sigs) = crate::outline::outline(&text, ext) {
+                    out.push_str(&format!("### #{id} {} ({total} lines)\n", rel.display()));
+                    lines += 1;
+                    for (n, s) in sigs {
+                        out.push_str(&format!("{n}: {s}\n"));
+                        lines += 1;
+                        if lines >= MAX_LINES {
+                            break;
+                        }
+                    }
+                }
+            }
+            if out.is_empty() {
+                return Err(format!("no outlinable code files in {target}"));
+            }
+            return Ok(out.trim_end().to_string());
+        }
+        // Single file.
+        let (id, abs) = self.resolve(target)?;
+        let ext = abs.extension().and_then(|x| x.to_str()).unwrap_or("").to_string();
+        let text = std::fs::read_to_string(&abs).map_err(|e| e.to_string())?;
+        let total = text.lines().count();
+        let sigs = crate::outline::outline(&text, &ext)
+            .ok_or(format!("no outline rules for .{ext} — use R"))?;
+        let mut out = format!("outline #{id} {} ({total} lines)\n", self.files[id as usize].display());
+        for (n, s) in sigs.into_iter().take(MAX_LINES) {
+            out.push_str(&format!("{n}: {s}\n"));
+        }
+        Ok(out.trim_end().to_string())
+    }
+
     /// Load an image for attaching to the next model request.
     pub fn load_image(&mut self, target: &str) -> Result<(u32, String, String, usize), String> {
         const MAX_IMAGE_BYTES: u64 = 6_000_000;
@@ -305,6 +364,17 @@ fn region_report(id: u32, lines: &[String], start: usize, nnew: usize) -> String
 
 /// Run a shell line, kill on timeout, merge stdout+stderr, report exit code.
 pub fn run_shell(line: &str, cwd: &Path, timeout_ms: u64, shell: &str) -> String {
+    run_shell_env(line, cwd, timeout_ms, shell, &std::collections::BTreeMap::new())
+}
+
+/// run_shell with extra environment variables (mods pass their [env] table).
+pub fn run_shell_env(
+    line: &str,
+    cwd: &Path,
+    timeout_ms: u64,
+    shell: &str,
+    envs: &std::collections::BTreeMap<String, String>,
+) -> String {
     let mut cmd = match shell {
         "powershell" => {
             let mut c = Command::new("powershell");
@@ -322,6 +392,7 @@ pub fn run_shell(line: &str, cwd: &Path, timeout_ms: u64, shell: &str) -> String
             c
         }
     };
+    cmd.envs(envs);
     cmd.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = match cmd.spawn() {
         Ok(c) => c,

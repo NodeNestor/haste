@@ -253,6 +253,7 @@ pub fn run_session(
             }
         };
         lexer.finish(&mut cmds);
+        rescue_done(&mut cmds, &cfg);
 
         if degenerated {
             degens += 1;
@@ -548,6 +549,7 @@ fn verb_of(cmd: &Cmd) -> char {
         Cmd::Done { .. } => 'D',
         Cmd::View { .. } => 'V',
         Cmd::Say { .. } => 'S',
+        Cmd::Outline { .. } => 'O',
         Cmd::Custom { verb, .. } => *verb,
     }
 }
@@ -571,6 +573,7 @@ fn action_of(cmd: &Cmd) -> String {
         Cmd::Done { .. } => "D".into(),
         Cmd::View { target } => format!("V {target}"),
         Cmd::Say { text } => format!("S {}", crate::tools::clip(text, 60)),
+        Cmd::Outline { target } => format!("O {target}"),
     }
 }
 
@@ -603,11 +606,12 @@ fn exec_one(
         Cmd::Insert { target, after, body } => flat(ws.insert(&target, after, &body)),
         Cmd::New { path, body } => flat(ws.new_file(&path, &body)),
         Cmd::Grep { pat, target } => flat(ws.grep(&pat, target.as_deref())),
+        Cmd::Outline { target } => flat(ws.outline(&target)),
         Cmd::Exec { line } => run_shell(&line, &ws.root, DEFAULT_TOOL_TIMEOUT_MS, &cfg.exec.shell),
         Cmd::Custom { verb, args } => match cfg.tool.get(&verb.to_string()) {
             Some(t) => {
                 let line = t.cmd.replace("{args}", &args);
-                let raw = run_shell(&line, &ws.root, t.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS), &cfg.exec.shell);
+                let raw = crate::tools::run_shell_env(&line, &ws.root, t.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS), &cfg.exec.shell, &t.env);
                 let spec = t.prune.as_deref().unwrap_or("");
                 if spec.split('|').any(|s| s.trim() == "distill") {
                     distill(client, cfg, task, &prune(spec, &raw))
@@ -622,6 +626,41 @@ fn exec_one(
     ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&result, 3), 400)));
     ledger.push(Kind::Action, turn, action, None);
     ledger.push(Kind::Result, turn, cap(result, ctx.result_cap_chars), file);
+}
+
+/// Models habitually write "D let me check that\nW <url>" — but D swallows the
+/// rest of the stream, so the W never runs and the run dies mid-thought. When
+/// a D message contains lines that parse into valid commands, convert: first
+/// line becomes an S (the talk), the commands execute, the run continues.
+fn rescue_done(cmds: &mut Vec<Cmd>, cfg: &Config) {
+    let Some(pos) = cmds.iter().position(|c| matches!(c, Cmd::Done { .. })) else { return };
+    let Cmd::Done { msg } = &cmds[pos] else { return };
+    let mut lines = msg.lines();
+    let first = lines.next().unwrap_or("").trim().to_string();
+    let rest = lines.collect::<Vec<_>>().join("\n");
+    if rest.trim().is_empty() {
+        return;
+    }
+    let mut lx = Lexer::new();
+    let mut sub = Vec::new();
+    lx.feed(&format!("{rest}\n"), &mut sub);
+    lx.finish(&mut sub);
+    let valid = |c: &Cmd| match c {
+        Cmd::Done { .. } => false,
+        Cmd::Agent { profile, .. } => cfg.profile.contains_key(profile),
+        Cmd::Custom { verb, .. } => cfg.tool.contains_key(&verb.to_string()),
+        _ => true,
+    };
+    if !sub.iter().any(valid) {
+        return; // a normal multi-line final report — leave it alone
+    }
+    sub.retain(|c| valid(c));
+    let mut replacement = Vec::new();
+    if !first.is_empty() {
+        replacement.push(Cmd::Say { text: first });
+    }
+    replacement.extend(sub);
+    cmds.splice(pos..=pos, replacement);
 }
 
 /// Emit + record an advisory line (loop-breaker notes, spawn acks, errors…).
@@ -728,6 +767,7 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     if allow('I') { s.push_str("I <id> <a>          insert after line a (0=top); content follows, end \".\"\n"); }
     if allow('N') { s.push_str("N <path>            create file; content follows, end \".\"\n"); }
     if allow('G') { s.push_str("G <regex> [id|path] search files, results as #id:line:text\n"); }
+    if allow('O') { s.push_str("O [id|path|dir]     outline: signatures with line numbers, bodies elided — orient cheaply BEFORE reading\n"); }
     if allow('X') { s.push_str("X <command>         run shell command in the repo root\n"); }
     if allow('V') { s.push_str("V <id|path>         view an image file (png/jpg/webp/gif) — you SEE it in the next turn\n"); }
     if allow('A') && !cfg.profile.is_empty() {
@@ -757,6 +797,9 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
          G \"load_cfg\" src\n\
          X python tests.py\n",
     );
+    if !cfg.prompt_extra.is_empty() {
+        s.push_str(&cfg.prompt_extra);
+    }
     s.push_str(&format!(
         "Plan: for multi-step work, create {plan_file} with N — \
          {{\"goal\":\"...\",\"steps\":[{{\"id\":\"..\",\"what\":\"..\",\"status\":\"todo\",\"needs\":[],\"verify\":\"shell cmd\"}}]}}. \

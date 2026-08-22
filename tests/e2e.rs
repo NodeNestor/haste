@@ -284,6 +284,40 @@ fn say_speaks_without_ending_the_run() {
 }
 
 #[test]
+fn done_with_trailing_commands_is_rescued() {
+    // "D let me check\nX echo hi" — the classic misuse: talk then work in one
+    // D. Must become S + executed command, run continuing.
+    let port = mock_server(vec!["D let me check that\nX echo hi\n", "D really done\n"]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "task", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "really done");
+    assert_eq!(rep.turns, 2);
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("you told the user: let me check that"), "say part missing");
+    assert!(ledger.contains("X echo hi"), "command part not executed");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn outline_verb_maps_a_file() {
+    let port = mock_server(vec!["O util.py\nD outlined\n"]);
+    let root = temp_repo();
+    std::fs::write(root.join("util.py"), "import os\n\nclass Tool:\n    def run(self):\n        return 1\n").unwrap();
+    let mut session = {
+        let cfg = Arc::new(cfg_for(port));
+        let mut s = haste::agent::Session::new(&cfg, root.clone(), 0);
+        haste::agent::run_session(Arc::clone(&cfg), &mut s, "map it", None, 0, haste::agent::Ctl::default());
+        s
+    };
+    let texts: Vec<&str> = session.ledger.entries.iter().map(|e| e.text.as_str()).collect();
+    let out = texts.iter().find(|t| t.starts_with("outline #")).expect("no outline result");
+    assert!(out.contains("3: class Tool:") && out.contains("4:     def run(self):"), "{out}");
+    assert!(!out.contains("return 1"), "body leaked: {out}");
+    let _ = session.ledger.entries.clear();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn plan_state_machine_enforces_and_verifies() {
     let port = mock_server(vec![
         // t1: write a plan with one verifiable step, then try to D early.

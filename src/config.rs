@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 
 /// Verbs implemented natively in the binary. Config tools must not shadow these.
-pub const NATIVE_VERBS: &str = "REIGNXADVS";
+pub const NATIVE_VERBS: &str = "REIGNXADVSO";
 
 #[derive(Deserialize, Clone)]
 pub struct Config {
@@ -19,6 +19,18 @@ pub struct Config {
     pub exec: ExecCfg,
     #[serde(default)]
     pub plan: PlanCfg,
+    /// Folder mods live here; each subdir with a mod.toml adds verbs/prompt.
+    #[serde(default = "d_mods_dir")]
+    pub mods_dir: String,
+    /// Accumulated prompt injections from loaded mods (not user-set).
+    #[serde(skip)]
+    pub prompt_extra: String,
+    /// Loader notes (loaded/skipped mods) for the UI.
+    #[serde(skip)]
+    pub mod_notes: Vec<String>,
+}
+fn d_mods_dir() -> String {
+    "~/.haste/mods".into()
 }
 
 /// The plan-file state machine (see plan.rs).
@@ -159,6 +171,9 @@ pub struct ToolCfg {
     pub prune: Option<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Env vars set for this tool's process (mods use this for their config).
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -228,7 +243,8 @@ impl Config {
                 })
                 .unwrap_or_else(|_| DEFAULT_TOML.to_string()),
         };
-        let cfg: Config = toml::from_str(&text).map_err(|e| format!("config parse: {e}"))?;
+        let mut cfg: Config = toml::from_str(&text).map_err(|e| format!("config parse: {e}"))?;
+        cfg.mod_notes = crate::mods::apply(&mut cfg);
         for verb in cfg.tool.keys() {
             let ok = verb.len() == 1
                 && verb.chars().next().unwrap().is_ascii_uppercase()

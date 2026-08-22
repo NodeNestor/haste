@@ -53,6 +53,9 @@ fn main() {
             std::process::exit(2);
         }
     };
+    for n in &cfg.mod_notes {
+        eprintln!("haste: {n}");
+    }
     let task = args.join(" ");
 
     // No task = interactive. Explicit --tui always wins.

@@ -4,6 +4,8 @@ pub mod client;
 pub mod config;
 pub mod dsl;
 pub mod ledger;
+pub mod mods;
+pub mod outline;
 pub mod plan;
 pub mod render;
 pub mod tools;

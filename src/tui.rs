@@ -64,11 +64,17 @@ pub fn run(cfg: Arc<Config>, root: PathBuf) -> io::Result<()> {
 
 fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Result<()> {
     let mut app = App {
-        log: vec![
-            (DIM, format!("haste · {} · {}", cfg.model.model, root.display())),
-            (DIM, "Enter task · :cd <path> · F2 stream · Esc stop · :q quit".into()),
-            (DIM, String::new()),
-        ],
+        log: {
+            let mut l = vec![
+                (DIM, format!("haste · {} · {}", cfg.model.model, root.display())),
+                (DIM, "Enter task · :cd <path> · F2 stream · Esc stop · :q quit".into()),
+            ];
+            for n in &cfg.mod_notes {
+                l.push((DIM, format!("  {n}")));
+            }
+            l.push((DIM, String::new()));
+            l
+        },
         live: String::new(),
         input: String::new(),
         root,
