@@ -586,11 +586,11 @@ fn loop_breaker_warns_then_refuses() {
     assert_eq!(rep.final_msg, "gave up");
     let texts: Vec<&str> = session.ledger.entries.iter().map(|e| e.text.as_str()).collect();
     assert!(
-        texts.iter().any(|t| t.contains("identical result 3 times")),
+        texts.iter().any(|t| t.contains("identical result every time")),
         "warning missing: {texts:?}"
     );
     assert!(
-        texts.iter().any(|t| t.contains("refused: this exact command")),
+        texts.iter().any(|t| t.contains("refusal #1")),
         "refusal missing: {texts:?}"
     );
     let _ = std::fs::remove_dir_all(root);

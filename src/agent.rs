@@ -392,8 +392,17 @@ pub fn run_session(
                     let key = crate::ledger::fnv(&format!("{other:?}"));
                     if repeats.get(&key).is_some_and(|(n, _)| *n >= 5) {
                         refusals += 1;
-                        let msg = "(refused: this exact command has repeated 5+ times with the same result — do something DIFFERENT, or answer with D)";
-                        note(ledger, &ctl, depth, turn, msg.into());
+                        // Every note is UNIQUE text with a rotating concrete
+                        // suggestion: deterministic samplers (diffusion) can
+                        // only escape a loop if their input actually changes.
+                        let hint = match refusals % 4 {
+                            0 => "read the file again with R before editing",
+                            1 => "rewrite the ENTIRE function in one E covering its full line range",
+                            2 => "run the failing check with X and act on its exact message",
+                            _ => "explain your plan to the user with S, then try a different command",
+                        };
+                        let msg = format!("(refusal #{refusals}: that command keeps repeating with the same result — {hint})");
+                        note(ledger, &ctl, depth, turn, msg);
                         continue;
                     }
                     exec_one(other, ws, ledger, &cfg, &client, task, turn, &ctx_cfg, &ctl, depth);
@@ -404,9 +413,13 @@ pub fn run_session(
                     } else {
                         *e = (1, res_hash);
                     }
-                    if e.0 == 3 {
-                        let msg = "(note: that command has now given the identical result 3 times — running it again will not help; change approach)";
-                        note(ledger, &ctl, depth, turn, msg.into());
+                    if e.0 >= 3 {
+                        // Also unique per occurrence (see refusal note above).
+                        let msg = format!(
+                            "(warning {}x: that command gives the identical result every time — running it again will not help; change approach)",
+                            e.0
+                        );
+                        note(ledger, &ctl, depth, turn, msg);
                     }
                 }
             }
