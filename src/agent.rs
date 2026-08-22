@@ -296,8 +296,14 @@ pub fn run_session(
         }
 
         // cc-json semantics: a message with no tool calls IS the final answer.
+        // The model may echo transcript markers — strip them from the text.
         if cc && cmds.is_empty() && !raw.trim().is_empty() {
-            cmds.push(Cmd::Done { msg: raw.trim().to_string() });
+            let msg = raw
+                .lines()
+                .map(|l| l.strip_prefix("ASSISTANT (message):").map(str::trim_start).unwrap_or(l))
+                .collect::<Vec<_>>()
+                .join("\n");
+            cmds.push(Cmd::Done { msg: msg.trim().to_string() });
         }
 
         if cmds.is_empty() {

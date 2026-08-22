@@ -108,11 +108,27 @@ impl Lexer {
         if line.is_empty() {
             return;
         }
-        if self.cc_json && line.starts_with('{') {
-            if let Some(cmd) = parse_cc_tool(line) {
-                out.push(cmd);
+        if self.cc_json {
+            // Accept the model echoing transcript notation back at us:
+            //   ASSISTANT (tool call) Bash input={...}   |   Name input={...}   |   {...}
+            let l2 = line
+                .strip_prefix("ASSISTANT (tool call)")
+                .map(str::trim_start)
+                .unwrap_or(line);
+            if let Some((name, rest)) = l2.split_once(" input=") {
+                if rest.trim_start().starts_with('{') && !name.contains(' ') {
+                    if let Some(cmd) = parse_cc_tool_named(name, rest.trim_start()) {
+                        out.push(cmd);
+                    }
+                    return;
+                }
             }
-            return;
+            if l2.starts_with('{') {
+                if let Some(cmd) = parse_cc_tool(l2) {
+                    out.push(cmd);
+                }
+                return;
+            }
         }
         let mut it = line.splitn(2, ' ');
         let verb = it.next().unwrap_or("");
@@ -196,8 +212,18 @@ impl Lexer {
 /// ignored (the empty-turn nudge handles a message of only unknowns).
 fn parse_cc_tool(line: &str) -> Option<Cmd> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let tool = v["tool"].as_str().or_else(|| v["name"].as_str())?;
-    let inp = if v["input"].is_object() { &v["input"] } else { &v["arguments"] };
+    let tool = v["tool"].as_str().or_else(|| v["name"].as_str())?.to_string();
+    let inp = if v["input"].is_object() { v["input"].clone() } else { v["arguments"].clone() };
+    map_cc_tool(&tool, &inp)
+}
+
+/// "Name input={json}" transcript form: the json IS the input object.
+fn parse_cc_tool_named(name: &str, json_part: &str) -> Option<Cmd> {
+    let inp: serde_json::Value = serde_json::from_str(json_part).ok()?;
+    map_cc_tool(name, &inp)
+}
+
+fn map_cc_tool(tool: &str, inp: &serde_json::Value) -> Option<Cmd> {
     let s = |k: &str| inp[k].as_str().map(str::to_string);
     match tool {
         "Bash" => Some(Cmd::Exec { line: s("command")? }),
@@ -287,6 +313,23 @@ mod tests {
             Cmd::Edit { target: "2".into(), a: 5, b: 6, body: "let x = 1;\n.hidden".into() }
         );
         assert_eq!(cmds[1], Cmd::Done { msg: "fixed".into() });
+    }
+
+    #[test]
+    fn cc_dialect_accepts_all_three_notations() {
+        let mut lx = Lexer::new_dialect(true);
+        let mut out = Vec::new();
+        lx.feed(
+            "{\"tool\":\"Bash\",\"input\":{\"command\":\"ls\"}}\n\
+             ASSISTANT (tool call) Read input={\"file_path\":\"a.py\"}\n\
+             Grep input={\"pattern\":\"foo\"}\n",
+            &mut out,
+        );
+        lx.finish(&mut out);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out[0], Cmd::Exec { line: "ls".into() });
+        assert_eq!(out[1], Cmd::Read { target: "a.py".into(), range: None });
+        assert_eq!(out[2], Cmd::Grep { pat: "foo".into(), target: None });
     }
 
     #[test]
