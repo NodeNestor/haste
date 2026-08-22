@@ -81,7 +81,6 @@ impl Client {
         let mut body = json!({
             "model": self.cfg.model,
             "max_tokens": self.cfg.max_tokens,
-            "temperature": self.cfg.temperature,
             "stream": true,
             "stream_options": {"include_usage": true},
             "messages": [
@@ -89,6 +88,11 @@ impl Client {
                 {"role": "user", "content": user_content},
             ],
         });
+        // temperature < 0 means "don't send it" — diffusion models (vLLM
+        // DiffusionGemma, Mercury) reject the parameter outright.
+        if self.cfg.temperature >= 0.0 {
+            body["temperature"] = json!(self.cfg.temperature);
+        }
         self.merge_extra(&mut body);
         let t0 = Instant::now();
         let resp = self.post(&body)?;
@@ -201,9 +205,11 @@ impl Client {
         let mut body = json!({
             "model": self.cfg.model,
             "max_tokens": max_tokens,
-            "temperature": 0.0,
             "messages": [{"role": "user", "content": prompt}],
         });
+        if self.cfg.temperature >= 0.0 {
+            body["temperature"] = json!(0.0);
+        }
         self.merge_extra(&mut body);
         let resp = self.post(&body)?;
         let v: Value = resp.into_json().map_err(|e| format!("bad json: {e}"))?;
