@@ -41,7 +41,10 @@ fn window(s: &str, lo: usize, hi: usize, before: usize, after: usize) -> String 
     }
     out
 }
-pub const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".haste", "__pycache__", "dist", ".venv"];
+pub const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".haste", "__pycache__", "dist", ".venv", "AppData"];
+const GREP_DEADLINE_MS: u128 = 5_000;
+const GREP_MAX_FILES: usize = 20_000;
+const GREP_MAX_FILE_BYTES: u64 = 2_000_000;
 
 /// The workspace: root dir + the file intern table. Paths are token sinks, so
 /// after first contact every file is a small integer (#3) in both directions.
@@ -157,14 +160,27 @@ impl Workspace {
             None => self.root.clone(),
         };
         let mut hits = Vec::new();
+        let root_target = base.clone();
         let mut stack = vec![base];
+        // Budgets: an untargeted G from a big root (a whole user profile) must
+        // come back in seconds with a note, never grind for minutes.
+        let t0 = std::time::Instant::now();
+        let mut scanned = 0usize;
+        let mut stopped: Option<String> = None;
         while let Some(p) = stack.pop() {
             if hits.len() >= GREP_MAX_HITS {
                 break;
             }
+            if t0.elapsed().as_millis() > GREP_DEADLINE_MS || scanned > GREP_MAX_FILES {
+                stopped = Some(format!(
+                    "(grep stopped early: {scanned} files / {:.1}s — narrow the target to a subdir or file)",
+                    t0.elapsed().as_secs_f64()
+                ));
+                break;
+            }
             if p.is_dir() {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if SKIP_DIRS.contains(&name) {
+                if (SKIP_DIRS.contains(&name) || name.starts_with('.')) && p != root_target {
                     continue;
                 }
                 if let Ok(rd) = std::fs::read_dir(&p) {
@@ -172,7 +188,12 @@ impl Workspace {
                         stack.push(e.path());
                     }
                 }
-            } else if let Ok(text) = std::fs::read_to_string(&p) {
+            } else if p.metadata().map_or(true, |m| m.len() > GREP_MAX_FILE_BYTES) {
+                continue;
+            } else if let Ok(text) = {
+                scanned += 1;
+                std::fs::read_to_string(&p)
+            } {
                 let mut id: Option<u32> = None;
                 for (i, line) in text.lines().enumerate() {
                     if let Some(m) = re.find(line) {
@@ -196,10 +217,17 @@ impl Workspace {
             }
         }
         if hits.is_empty() {
-            return Ok(format!("no hits for /{pat}/"));
+            return Ok(match stopped {
+                Some(note) => format!("no hits for /{pat}/ yet {note}"),
+                None => format!("no hits for /{pat}/"),
+            });
         }
         let mut out = self.legend_delta();
         out.push_str(&hits.join("\n"));
+        if let Some(note) = stopped {
+            out.push('\n');
+            out.push_str(&note);
+        }
         Ok(out)
     }
 

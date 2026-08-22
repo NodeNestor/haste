@@ -305,6 +305,26 @@ fn verb_of(cmd: &Cmd) -> char {
     }
 }
 
+fn action_of(cmd: &Cmd) -> String {
+    match cmd {
+        Cmd::Read { target, range } => match range {
+            Some((x, y)) => format!("R {target} {x}:{y}"),
+            None => format!("R {target}"),
+        },
+        Cmd::Edit { target, a, b, body } => format!("E {target} {a}:{b} (+{} lines)", body.lines().count()),
+        Cmd::Insert { target, after, body } => format!("I {target} {after} (+{} lines)", body.lines().count()),
+        Cmd::New { path, body } => format!("N {path} (+{} lines)", body.lines().count()),
+        Cmd::Grep { pat, target } => match target {
+            Some(t) => format!("G \"{pat}\" {t}"),
+            None => format!("G \"{pat}\""),
+        },
+        Cmd::Exec { line } => format!("X {line}"),
+        Cmd::Custom { verb, args } => format!("{verb} {args}"),
+        Cmd::Agent { profile, task } => format!("A {profile} {task}"),
+        Cmd::Done { .. } => "D".into(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn exec_one(
     cmd: Cmd,
@@ -318,6 +338,9 @@ fn exec_one(
     ctl: &Ctl,
     depth: u8,
 ) {
+    // Announce BEFORE executing: a slow tool must show up in the status bar
+    // while it runs, not after it finishes.
+    ctl.emit(Ev::Action(depth, crate::tools::clip(&action_of(&cmd), 200)));
     let (action, result, file) = match cmd {
         Cmd::Read { target, range } => {
             let a = match range {
@@ -388,7 +411,6 @@ fn exec_one(
         }
         Cmd::Agent { .. } | Cmd::Done { .. } => unreachable!("handled by caller"),
     };
-    ctl.emit(Ev::Action(depth, crate::tools::clip(&action, 200)));
     ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&result, 3), 400)));
     ledger.push(Kind::Action, turn, action, None);
     let result = cap(result, ctx.result_cap_chars);
