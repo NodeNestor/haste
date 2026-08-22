@@ -19,6 +19,8 @@ pub struct Config {
     pub exec: ExecCfg,
     #[serde(default)]
     pub plan: PlanCfg,
+    #[serde(default)]
+    pub verify: VerifyCfg,
     /// Folder mods live here; each subdir with a mod.toml adds verbs/prompt.
     #[serde(default = "d_mods_dir")]
     pub mods_dir: String,
@@ -31,6 +33,27 @@ pub struct Config {
 }
 fn d_mods_dir() -> String {
     "~/.haste/mods".into()
+}
+
+/// Auto-verify: run this command automatically after any turn that edited
+/// files, injecting the result — deletes the model's explicit "run tests"
+/// turn (the most common turn in every trajectory). A failing verify also
+/// refuses a same-turn D.
+#[derive(Deserialize, Clone, Default)]
+pub struct VerifyCfg {
+    #[serde(default)]
+    pub cmd: Option<String>,
+    #[serde(default = "d_verify_timeout")]
+    pub timeout_ms: u64,
+    /// Pruner chain for the verify output (default: first failure only).
+    #[serde(default = "d_verify_prune")]
+    pub prune: String,
+}
+fn d_verify_timeout() -> u64 {
+    180_000
+}
+fn d_verify_prune() -> String {
+    "first_failure".into()
 }
 
 /// The plan-file state machine (see plan.rs).

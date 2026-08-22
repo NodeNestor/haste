@@ -318,6 +318,47 @@ fn outline_verb_maps_a_file() {
 }
 
 #[test]
+fn auto_verify_runs_after_edits_and_gates_done() {
+    // Failing verify: the same-turn D is refused; a later D (no edits) passes.
+    let port = mock_server(vec![
+        "E 0 2:2\nworld\n.\nD fixed it\n",
+        "D giving my report anyway\n",
+    ]);
+    let root = temp_repo();
+    let toml = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\n\
+         [context]\nbootstrap = false\n[verify]\ncmd = \"exit 5\"\n"
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    // Pre-intern greet.txt as #0 for the scripted edit.
+    session.ws.read("greet.txt", None).unwrap();
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "fix", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "giving my report anyway");
+    assert_eq!(rep.turns, 2);
+    let texts: Vec<&str> = session.ledger.entries.iter().map(|e| e.text.as_str()).collect();
+    assert!(texts.iter().any(|t| t.starts_with("(auto-verify FAIL")), "no auto-verify: {texts:?}");
+    assert!(texts.iter().any(|t| t.contains("D refused — auto-verify")), "no gate: {texts:?}");
+
+    // Passing verify: edit + D completes in one turn.
+    let port2 = mock_server(vec!["E 0 2:2\nworld\n.\nD done\n"]);
+    let root2 = temp_repo();
+    let toml2 = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port2}/v1\"\nmodel = \"mock\"\n\
+         [context]\nbootstrap = false\n[verify]\ncmd = \"echo tests pass\"\n"
+    );
+    let cfg2: Arc<Config> = Arc::new(toml::from_str(&toml2).unwrap());
+    let mut s2 = haste::agent::Session::new(&cfg2, root2.clone(), 0);
+    s2.ws.read("greet.txt", None).unwrap();
+    let rep2 = haste::agent::run_session(Arc::clone(&cfg2), &mut s2, "fix", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep2.final_msg, "done");
+    assert_eq!(rep2.turns, 1, "pass case must finish in one turn");
+    assert!(s2.ledger.entries.iter().any(|e| e.text.starts_with("(auto-verify PASS")));
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root2);
+}
+
+#[test]
 fn plan_state_machine_enforces_and_verifies() {
     let port = mock_server(vec![
         // t1: write a plan with one verifiable step, then try to D early.

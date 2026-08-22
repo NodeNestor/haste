@@ -53,6 +53,14 @@ pub struct Workspace {
     files: Vec<PathBuf>,
 }
 
+/// read_to_string with a UTF-8 BOM stripped: BOMs are display noise, break
+/// exact matching, and Python rejects them anywhere but byte 0 — reading them
+/// away means edits rewrite files clean.
+fn read_clean(abs: &Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(abs).map_err(|e| e.to_string())?;
+    Ok(text.strip_prefix('\u{feff}').map(str::to_string).unwrap_or(text))
+}
+
 impl Workspace {
     pub fn new(root: PathBuf) -> Workspace {
         Workspace { root, files: Vec::new() }
@@ -92,7 +100,7 @@ impl Workspace {
 
     pub fn read(&mut self, target: &str, range: Option<(usize, usize)>) -> Result<String, String> {
         let (id, abs) = self.resolve(target)?;
-        let text = std::fs::read_to_string(&abs).map_err(|e| format!("read {target}: {e}"))?;
+        let text = read_clean(&abs).map_err(|e| format!("read {target}: {e}"))?;
         let lines: Vec<&str> = text.lines().collect();
         let (a, b) = match range {
             Some((a, b)) => (a.max(1), b.min(lines.len())),
@@ -113,7 +121,7 @@ impl Workspace {
     /// numbering of the touched region so the model never works from stale lines.
     pub fn edit(&mut self, target: &str, a: usize, b: usize, body: &str) -> Result<String, String> {
         let (id, abs) = self.resolve(target)?;
-        let text = std::fs::read_to_string(&abs).map_err(|e| e.to_string())?;
+        let text = read_clean(&abs)?;
         let mut lines: Vec<String> = text.lines().map(String::from).collect();
         if a < 1 || b < a || b > lines.len() {
             return Err(format!("bad range {a}:{b} (#{id} has {} lines)", lines.len()));
@@ -128,7 +136,7 @@ impl Workspace {
     /// Insert body after line `after` (0 = top of file).
     pub fn insert(&mut self, target: &str, after: usize, body: &str) -> Result<String, String> {
         let (id, abs) = self.resolve(target)?;
-        let text = std::fs::read_to_string(&abs).map_err(|e| e.to_string())?;
+        let text = read_clean(&abs)?;
         let mut lines: Vec<String> = text.lines().map(String::from).collect();
         if after > lines.len() {
             return Err(format!("insert point {after} past end ({} lines)", lines.len()));
@@ -262,7 +270,7 @@ impl Workspace {
                 }
                 let rel = p.strip_prefix(&self.root).unwrap_or(&p).to_path_buf();
                 let id = self.intern(&rel);
-                let text = std::fs::read_to_string(&p).unwrap_or_default();
+                let text = read_clean(&p).unwrap_or_default();
                 let total = text.lines().count();
                 if let Some(sigs) = crate::outline::outline(&text, ext) {
                     out.push_str(&format!("### #{id} {} ({total} lines)\n", rel.display()));
@@ -284,7 +292,7 @@ impl Workspace {
         // Single file.
         let (id, abs) = self.resolve(target)?;
         let ext = abs.extension().and_then(|x| x.to_str()).unwrap_or("").to_string();
-        let text = std::fs::read_to_string(&abs).map_err(|e| e.to_string())?;
+        let text = read_clean(&abs)?;
         let total = text.lines().count();
         let sigs = crate::outline::outline(&text, &ext)
             .ok_or(format!("no outline rules for .{ext} — use R"))?;

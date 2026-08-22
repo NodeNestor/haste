@@ -303,6 +303,7 @@ pub fn run_session(
 
         let t_tools = Instant::now();
         let mut done: Option<String> = None;
+        let mut edited = false;
         let mut say_final = false;
         // A turn that is ONLY talk (S with no work and no subagents pending)
         // means the model is waiting on the user: hand the mic back instead of
@@ -405,7 +406,11 @@ pub fn run_session(
                         note(ledger, &ctl, depth, turn, msg);
                         continue;
                     }
+                    let is_edit = matches!(other, Cmd::Edit { .. } | Cmd::Insert { .. } | Cmd::New { .. });
                     exec_one(other, ws, ledger, &cfg, &client, task, turn, &ctx_cfg, &ctl, depth);
+                    if is_edit && ledger.entries.last().is_some_and(|e| !e.text.starts_with("err")) {
+                        edited = true;
+                    }
                     let res_hash = ledger.entries.last().map(|e| e.hash).unwrap_or(0);
                     let e = repeats.entry(key).or_insert((0, 0));
                     if e.1 == res_hash {
@@ -421,6 +426,28 @@ pub fn run_session(
                         );
                         note(ledger, &ctl, depth, turn, msg);
                     }
+                }
+            }
+        }
+        // Auto-verify: after any editing turn, run the configured check and
+        // inject its result — the model's explicit "run the tests" turn (the
+        // most common turn in every trajectory) becomes unnecessary. A failing
+        // verify also refuses a same-turn D.
+        if edited {
+            if let Some(vcmd) = &cfg.verify.cmd {
+                let out = run_shell(vcmd, &root, cfg.verify.timeout_ms, &cfg.exec.shell);
+                let ok = out.starts_with("ok");
+                let pruned = prune(&cfg.verify.prune, &out);
+                note(
+                    ledger,
+                    &ctl,
+                    depth,
+                    turn,
+                    format!("(auto-verify {}: `{vcmd}`)\n{pruned}", if ok { "PASS" } else { "FAIL" }),
+                );
+                if !ok && done.is_some() && !say_final {
+                    note(ledger, &ctl, depth, turn, "(D refused — auto-verify FAILED after your edits; fix it first)".into());
+                    done = None;
                 }
             }
         }
@@ -823,6 +850,11 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     );
     if !cfg.prompt_extra.is_empty() {
         s.push_str(&cfg.prompt_extra);
+    }
+    if let Some(v) = &cfg.verify.cmd {
+        s.push_str(&format!(
+            "After any turn where you edit files, `{v}` runs AUTOMATICALLY and its result is shown — never run it yourself.\n"
+        ));
     }
     s.push_str(&format!(
         "Plan: for multi-step work, create {plan_file} with N — \
