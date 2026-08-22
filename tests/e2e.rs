@@ -192,7 +192,9 @@ fn event_stream_feeds_a_ui() {
 #[test]
 fn model_compaction_seals_history_but_ledger_stays_lossless() {
     let port = mock_server(vec![
-        // Long final message so run 1's history alone busts the tiny budget.
+        // Enough commands that run 1 leaves >=8 ledger entries (hysteresis
+        // arms) and a verbose finish that busts the tiny budget.
+        "X echo a\nX echo b\nX echo c\n",
         "D one — this deliberately verbose completion note pads the ledger well past the ten-token budget so run two must compact first\n",
         // run 2, request 1 is the compaction call (over budget) — the mock's
         // reply becomes the summary, not a command stream.

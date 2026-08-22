@@ -135,9 +135,7 @@ fn drain_events(app: &mut App) -> bool {
             }
             Ev::Delta(d) => app.live.push_str(&d),
             Ev::Action(depth, a) => {
-                if depth == 0 {
-                    app.last_action = a.clone();
-                }
+                app.last_action = if depth == 0 { a.clone() } else { format!("[sub] {a}") };
                 let pad = "  ".repeat(depth as usize);
                 app.push(DIM, format!("  {pad}· {a}"));
             }

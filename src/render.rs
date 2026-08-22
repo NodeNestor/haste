@@ -13,9 +13,15 @@ use std::collections::HashMap;
 /// reseal() folds everything older than the seal point exactly once and the
 /// fold is then frozen (stored as an override) so the byte prefix stays
 /// stable for provider-side prefix caches.
+/// Compaction re-arms only after this many new entries since the last seal —
+/// otherwise a session whose RECENT entries alone bust the budget would
+/// compact every turn without ever getting smaller.
+const MIN_ENTRIES_BETWEEN_SEALS: usize = 8;
+
 pub struct Renderer {
     sealed_upto: usize,
     overrides: HashMap<usize, String>,
+    last_seal_len: usize,
 }
 
 impl Renderer {
@@ -23,12 +29,17 @@ impl Renderer {
         Renderer {
             sealed_upto: 0,
             overrides: HashMap::new(),
+            last_seal_len: 0,
         }
     }
 
-    /// Append mode only: would the rendered document exceed the budget?
+    /// Append mode only: over budget AND enough new history to be worth
+    /// sealing again (hysteresis — see MIN_ENTRIES_BETWEEN_SEALS).
     pub fn over_budget(&self, ledger: &Ledger, cfg: &CtxCfg) -> bool {
         if cfg.mode != "append" {
+            return false;
+        }
+        if ledger.entries.len() < self.last_seal_len + MIN_ENTRIES_BETWEEN_SEALS {
             return false;
         }
         let total: usize = ledger
@@ -51,8 +62,11 @@ impl Renderer {
             .iter()
             .rposition(|e| e.kind == Kind::Task)
             .unwrap_or(usize::MAX);
+        // The new briefing was written while SEEING earlier summaries, so it
+        // subsumes them: sweep from 0, replacing prior summary blocks instead
+        // of letting them accumulate.
         let mut placed = false;
-        for i in self.sealed_upto..keep_from {
+        for i in 0..keep_from {
             match ledger.entries[i].kind {
                 Kind::Pin => continue,
                 Kind::Task if i == last_task => continue,
@@ -67,6 +81,7 @@ impl Renderer {
             }
         }
         self.sealed_upto = keep_from;
+        self.last_seal_len = n;
     }
 
     pub fn render(&mut self, ledger: &Ledger, cfg: &CtxCfg, turn: u32) -> String {

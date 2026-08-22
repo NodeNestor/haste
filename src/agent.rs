@@ -182,7 +182,9 @@ pub fn run_session(
                 length_capped = s.finish_reason.as_deref() == Some("length");
             }
             Err(e) => {
-                ledger.push(Kind::Result, turn, format!("model error: {e}"), None);
+                let msg = format!("model error: {e}");
+                ctl.emit(Ev::Result(depth, crate::tools::clip(&msg, 300)));
+                ledger.push(Kind::Result, turn, msg, None);
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             }
@@ -258,6 +260,12 @@ pub fn run_session(
                     }
                 }
             }
+        }
+        if !spawned.is_empty() {
+            ctl.emit(Ev::Result(
+                depth,
+                format!("(waiting on {} subagent{}…)", spawned.len(), if spawned.len() == 1 { "" } else { "s" }),
+            ));
         }
         for (name, h) in spawned {
             let sub = h.join().unwrap_or_default();
