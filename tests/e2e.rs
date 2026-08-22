@@ -258,6 +258,53 @@ fn length_cap_writes_partial_and_tells_model_to_continue() {
 }
 
 #[test]
+fn subagents_stream_in_and_done_waits_for_stragglers() {
+    let sleep = if cfg!(windows) { "X powershell -Command Start-Sleep -Milliseconds 900\n" } else { "X sleep 1\n" };
+    let port = mock_server(vec![
+        // parent turn 1: spawn researcher, then D immediately (premature).
+        "A researcher find the answer\nD too early\n",
+        // researcher turn 1 (runs concurrently, consumes next script): slow tool then finish.
+        Box::leak(format!("{sleep}D sub-answer: 42\n").into_boxed_str()),
+        // parent turn 2, after forced wait + briefs landed: real finish.
+        "D final with sub knowledge\n",
+    ]);
+    let root = temp_repo();
+    let toml = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\n\
+         [context]\nbootstrap = false\n\
+         [profile.researcher]\nsystem = \"research\"\ntools = \"RGX\"\n"
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "big question", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "final with sub knowledge");
+    let texts: Vec<&str> = session.ledger.entries.iter().map(|e| e.text.as_str()).collect();
+    let brief = texts.iter().position(|t| t.contains("[researcher]") && t.contains("sub-answer: 42"));
+    let final_pos = texts.iter().position(|t| t.contains("final with sub knowledge"));
+    assert!(brief.is_some(), "brief missing: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("incorporate their briefs")),
+        "wait note missing"
+    );
+    assert!(brief.unwrap() < final_pos.unwrap(), "brief must land before the final answer");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn zero_max_turns_means_unlimited() {
+    let port = mock_server(vec!["X echo a\n", "X echo b\n", "X echo c\n", "D unbounded\n"]);
+    let root = temp_repo();
+    let toml = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\n[context]\nmax_turns = 0\nbootstrap = false\n"
+    );
+    let cfg: Config = toml::from_str(&toml).unwrap();
+    let rep = haste::agent::run(Arc::new(cfg), root.clone(), "go", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "unbounded");
+    assert_eq!(rep.turns, 4);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn empty_done_is_not_max_turns() {
     let port = mock_server(vec!["D\n"]);
     let root = temp_repo();

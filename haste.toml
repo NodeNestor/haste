@@ -19,7 +19,7 @@ enable_thinking = false                   # no reasoning — iterate, don't deli
 mode = "append"          # "append" (prefix-cache friendly) | "working_set" (max compression)
 budget_tokens = 16000
 fold_after_turns = 6     # working_set: tool results older than this collapse to one line
-max_turns = 60
+max_turns = 0            # 0 = unlimited; loop breaker + empty-turn abort + Esc are the guards
 result_cap_chars = 12000
 
 # ---- config-declared tools: one uppercase verb (outside REIGNXAD) each ----
@@ -45,13 +45,13 @@ prune = "drop:^\\s*<|distill"
 [profile.researcher]
 system = "You research. Gather facts fast, never edit files. Your D message is a terse brief of findings."
 tools = "RGXW"
-max_turns = 15
+max_turns = 0
 budget_tokens = 8000
 
 [profile.fixer]
 system = "You fix exactly the issue in the task. Verify with C/T before D."
 tools = "REIGNXTC"
-max_turns = 25
+max_turns = 0
 budget_tokens = 10000
 
 [distill]

@@ -117,11 +117,21 @@ pub fn run_session(
     let mut rep = Report::default();
     let mut empty_turns = 0u32;
     let base = session.turn_base;
+    // Background subagents: spawned here, never blocking a turn. Finished ones
+    // are harvested at the top of each turn; D waits for stragglers.
+    let mut pending: Vec<(String, std::thread::JoinHandle<Report>)> = Vec::new();
     // Loop breaker: per exact command, how many times in a row it produced the
     // exact same result. 3 → warn; 5 → refuse to execute it again.
     let mut repeats: std::collections::HashMap<u64, (u32, u64)> = std::collections::HashMap::new();
 
-    for i in 1..=max_turns {
+    let mut i = 0u32;
+    loop {
+        i += 1;
+        // max_turns = 0 means unlimited: the loop breaker, empty-turn abort,
+        // and Esc are the real guards against runaways.
+        if max_turns > 0 && i > max_turns {
+            break;
+        }
         // Ledger turn numbers keep counting across tasks in a continued
         // session so the renderer's age-based folding stays correct.
         let turn = base + i;
@@ -131,6 +141,19 @@ pub fn run_session(
         }
         rep.turns = i;
         ctl.emit(Ev::Turn(i));
+
+        // Harvest any subagents that finished while we were working — their
+        // briefs enter the context now, without ever having blocked a turn.
+        let mut k = 0;
+        while k < pending.len() {
+            if pending[k].1.is_finished() {
+                let (name, h) = pending.remove(k);
+                let sub = h.join().unwrap_or_default();
+                harvest(&name, sub, ledger, &ctl, depth, turn, &mut rep);
+            } else {
+                k += 1;
+            }
+        }
 
         // Model compaction: when over budget, ask the model to summarize its
         // own history. The prompt is the SAME document the provider's KV cache
@@ -204,7 +227,6 @@ pub fn run_session(
         rep.commands += cmds.len();
 
         let t_tools = Instant::now();
-        let mut spawned: Vec<(String, std::thread::JoinHandle<Report>)> = Vec::new();
         let mut done: Option<String> = None;
         for cmd in cmds {
             if let Some(allow) = &allowed {
@@ -232,7 +254,7 @@ pub fn run_session(
                     let p2 = profile.clone();
                     let t2 = task.clone();
                     let ctl2 = ctl.clone();
-                    spawned.push((
+                    pending.push((
                         profile,
                         std::thread::spawn(move || run(cfg2, root2, &t2, Some(&p2), depth + 1, ctl2)),
                     ));
@@ -261,23 +283,6 @@ pub fn run_session(
                 }
             }
         }
-        if !spawned.is_empty() {
-            ctl.emit(Ev::Result(
-                depth,
-                format!("(waiting on {} subagent{}…)", spawned.len(), if spawned.len() == 1 { "" } else { "s" }),
-            ));
-        }
-        for (name, h) in spawned {
-            let sub = h.join().unwrap_or_default();
-            ctl.emit(Ev::Result(depth, format!("[{name}] ({} turns) {}", sub.turns, first_lines(&sub.final_msg, 2))));
-            ledger.push(
-                Kind::Result,
-                turn,
-                format!("[{name}] ({} turns) {}", sub.turns, sub.final_msg),
-                None,
-            );
-            rep.model_ms += sub.model_ms; // subagent time is still model time
-        }
         rep.tool_ms += t_tools.elapsed().as_millis();
 
         if length_capped {
@@ -287,12 +292,34 @@ pub fn run_session(
         }
 
         if let Some(msg) = done {
+            if !pending.is_empty() {
+                // D while subagents are still out: wait for them, feed their
+                // briefs to the model, and let it finish with full knowledge.
+                ctl.emit(Ev::Result(
+                    depth,
+                    format!("(waiting on {} subagent{} before finishing…)", pending.len(), if pending.len() == 1 { "" } else { "s" }),
+                ));
+                for (name, h) in pending.drain(..) {
+                    let sub = h.join().unwrap_or_default();
+                    harvest(&name, sub, ledger, &ctl, depth, turn, &mut rep);
+                }
+                let note = "(all subagents have returned — incorporate their briefs above, then finish with D)";
+                ctl.emit(Ev::Result(depth, note.into()));
+                ledger.push(Kind::Result, turn, note.into(), None);
+                continue;
+            }
             let msg = clean_final(&msg);
             let msg = if msg.is_empty() { "done.".to_string() } else { msg };
             ledger.push(Kind::Final, turn, msg.clone(), None);
             rep.final_msg = msg;
             break;
         }
+    }
+    // Abort paths can leave subagents running: collect them so their work
+    // still lands in the ledger and no thread outlives the session silently.
+    for (name, h) in pending.drain(..) {
+        let sub = h.join().unwrap_or_default();
+        harvest(&name, sub, ledger, &ctl, depth, base + rep.turns, &mut rep);
     }
     if rep.final_msg.is_empty() {
         rep.final_msg = "(max turns reached)".into();
@@ -316,6 +343,21 @@ pub fn run_session(
 
 fn first_lines(s: &str, n: usize) -> String {
     s.lines().take(n).collect::<Vec<_>>().join(" | ")
+}
+
+/// Land a finished subagent's brief in the ledger and UI.
+fn harvest(name: &str, sub: Report, ledger: &mut Ledger, ctl: &Ctl, depth: u8, turn: u32, rep: &mut Report) {
+    ctl.emit(Ev::Result(
+        depth,
+        crate::tools::clip(&format!("[{name}] ({} turns) {}", sub.turns, first_lines(&sub.final_msg, 2)), 400),
+    ));
+    ledger.push(
+        Kind::Result,
+        turn,
+        format!("[{name}] ({} turns) {}", sub.turns, sub.final_msg),
+        None,
+    );
+    rep.model_ms += sub.model_ms; // subagent time is still model time
 }
 
 /// D swallows the rest of the stream, so a degenerating model can append
@@ -498,7 +540,10 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     if allow('X') { s.push_str("X <command>         run shell command in the repo root\n"); }
     if allow('A') && !cfg.profile.is_empty() {
         let names: Vec<&str> = cfg.profile.keys().map(String::as_str).collect();
-        s.push_str(&format!("A <profile> <task>  delegate to a subagent; profiles: {}\n", names.join(", ")));
+        s.push_str(&format!(
+            "A <profile> <task>  start a BACKGROUND subagent; its [profile] brief arrives as a result in a later turn — keep working meanwhile. Profiles: {}\n",
+            names.join(", ")
+        ));
     }
     for (v, t) in &cfg.tool {
         if allow(v.chars().next().unwrap()) {
