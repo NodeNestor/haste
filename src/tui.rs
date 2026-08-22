@@ -32,6 +32,7 @@ struct App {
     stream_on: bool,
     scroll: usize,
     turn: u32,
+    last_action: String,
     started: Option<Instant>,
     rx: Option<Receiver<Ev>>,
     sess_rx: Option<Receiver<Session>>,
@@ -74,6 +75,7 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
         stream_on: true,
         scroll: 0,
         turn: 0,
+        last_action: String::new(),
         started: None,
         rx: None,
         sess_rx: None,
@@ -133,6 +135,9 @@ fn drain_events(app: &mut App) -> bool {
             }
             Ev::Delta(d) => app.live.push_str(&d),
             Ev::Action(depth, a) => {
+                if depth == 0 {
+                    app.last_action = a.clone();
+                }
                 let pad = "  ".repeat(depth as usize);
                 app.push(DIM, format!("  {pad}· {a}"));
             }
@@ -160,6 +165,7 @@ fn finish_run(app: &mut App, msg: String) {
     app.push(PLAIN, String::new());
     app.running = false;
     app.live.clear();
+    app.last_action.clear();
     app.rx = None;
     app.stop = None;
     // Take the continued session back from the worker thread.
@@ -292,12 +298,15 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
         .lines()
         .map(|l| 1 + l.len() / w.saturating_sub(1).max(1))
         .sum();
+    // Bottom rows: input, status bar, and two blank padding rows so the chat
+    // floats a little above the bar instead of sitting on it.
+    let usable = h - 4;
     let stream_h = if app.stream_on && app.running && live_lines > 0 {
-        (live_lines + 1).min((h - 2) / 2)
+        (live_lines + 1).min(usable / 2)
     } else {
         0
     };
-    let log_h = h - 2 - stream_h;
+    let log_h = usable - stream_h;
 
     // Session log (top), bottom-anchored.
     let mut wrapped: Vec<(u8, String)> = Vec::new();
@@ -338,7 +347,12 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
     // Status bar.
     let state = if app.running {
         let secs = app.started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
-        format!("turn {} · {:.0}s", app.turn, secs)
+        let act = if app.last_action.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", app.last_action)
+        };
+        format!("turn {} · {:.0}s{act}", app.turn, secs)
     } else {
         "idle".into()
     };

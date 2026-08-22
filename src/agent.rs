@@ -259,7 +259,7 @@ pub fn run_session(
     rep.wall_ms = t_start.elapsed().as_millis();
     if depth == 0 {
         ctl.emit(Ev::Report(format!(
-            "{} turn{} Â· {} cmd{} Â· {:.1}s Â· ~{}t sent",
+            "{} turn{} · {} cmd{} · {:.1}s · ~{}t sent",
             rep.turns,
             if rep.turns == 1 { "" } else { "s" },
             rep.commands,
