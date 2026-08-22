@@ -190,6 +190,50 @@ fn event_stream_feeds_a_ui() {
 }
 
 #[test]
+fn model_compaction_seals_history_but_ledger_stays_lossless() {
+    let port = mock_server(vec![
+        // Long final message so run 1's history alone busts the tiny budget.
+        "D one — this deliberately verbose completion note pads the ledger well past the ten-token budget so run two must compact first\n",
+        // run 2, request 1 is the compaction call (over budget) — the mock's
+        // reply becomes the summary, not a command stream.
+        "COMPACT BRIEF: finished task one; greet.txt untouched.\n",
+        "D two\n",
+    ]);
+    let root = temp_repo();
+    let toml = format!(
+        r#"
+[model]
+base_url = "http://127.0.0.1:{port}/v1"
+model = "mock"
+
+[context]
+mode = "append"
+budget_tokens = 10
+bootstrap = false
+compact = "model"
+compact_keep_last = 2
+"#
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let r1 = haste::agent::run_session(Arc::clone(&cfg), &mut session, "first task", None, 0, haste::agent::Ctl::default());
+    assert!(r1.final_msg.starts_with("one"), "{}", r1.final_msg);
+    let r2 = haste::agent::run_session(Arc::clone(&cfg), &mut session, "second task", None, 0, haste::agent::Ctl::default());
+    assert_eq!(r2.final_msg, "two");
+    // The rendered view carries the model summary…
+    let mut cfg2 = cfg.context.clone();
+    cfg2.budget_tokens = 100_000; // render without re-triggering structural fold
+    let doc = session.renderer.render(&session.ledger, &cfg2, 99);
+    assert!(doc.contains("[history compressed]") && doc.contains("COMPACT BRIEF"), "{doc}");
+    // …but the lossless ledger never absorbed it.
+    assert!(
+        session.ledger.entries.iter().all(|e| !e.text.contains("COMPACT BRIEF")),
+        "summary leaked into the ledger"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn length_cap_writes_partial_and_tells_model_to_continue() {
     let port = mock_server(vec![
         // Payload guillotined mid-file: no "." terminator, finish_reason=length.

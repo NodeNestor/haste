@@ -131,6 +131,31 @@ pub fn run_session(
         }
         rep.turns = i;
         ctl.emit(Ev::Turn(i));
+
+        // Model compaction: when over budget, ask the model to summarize its
+        // own history. The prompt is the SAME document the provider's KV cache
+        // already holds plus one appended instruction — prefill is ~free, we
+        // pay only the summary's decode. The ledger stays lossless; the
+        // summary is a render-layer seal. Falls back to structural folding.
+        if ctx_cfg.compact == "model" && renderer.over_budget(ledger, &ctx_cfg) {
+            let doc = renderer.render(ledger, &ctx_cfg, turn);
+            let cuser = format!(
+                "{doc}\n## COMPRESS\nCompact your working memory: write a terse briefing (max 40 lines) \
+                 preserving the current task and its exact state, files touched (#ids and paths), key \
+                 findings and decisions, remaining steps, and pitfalls already hit. Output only the briefing.\n"
+            );
+            let mut summary = String::new();
+            if let Ok(s) = client.stream(&system, &cuser, &mut |d| summary.push_str(d)) {
+                rep.model_ms += s.total_ms;
+                let summary = clean_final(summary.trim());
+                if !summary.is_empty() {
+                    renderer.seal_summary(ledger, ctx_cfg.compact_keep_last, summary);
+                    let note = "(history compacted via prompt-cached model summary)";
+                    ctl.emit(Ev::Result(depth, note.into()));
+                }
+            }
+        }
+
         let t_r = Instant::now();
         let doc = renderer.render(ledger, &ctx_cfg, turn);
         // File legend goes at the BOTTOM: it grows as files intern, and

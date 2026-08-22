@@ -26,6 +26,49 @@ impl Renderer {
         }
     }
 
+    /// Append mode only: would the rendered document exceed the budget?
+    pub fn over_budget(&self, ledger: &Ledger, cfg: &CtxCfg) -> bool {
+        if cfg.mode != "append" {
+            return false;
+        }
+        let total: usize = ledger
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| est_tokens(self.overrides.get(&i).map(String::as_str).unwrap_or(&e.text)))
+            .sum();
+        total > cfg.budget_tokens
+    }
+
+    /// Seal history behind a model-written summary. Render-layer only — the
+    /// ledger is never touched (compression is a rendering decision). Pins,
+    /// the most recent Task entry, and the last `keep_last` entries survive.
+    pub fn seal_summary(&mut self, ledger: &Ledger, keep_last: usize, summary: String) {
+        let n = ledger.entries.len();
+        let keep_from = n.saturating_sub(keep_last).max(self.sealed_upto);
+        let last_task = ledger
+            .entries
+            .iter()
+            .rposition(|e| e.kind == Kind::Task)
+            .unwrap_or(usize::MAX);
+        let mut placed = false;
+        for i in self.sealed_upto..keep_from {
+            match ledger.entries[i].kind {
+                Kind::Pin => continue,
+                Kind::Task if i == last_task => continue,
+                _ => {
+                    if placed {
+                        self.overrides.insert(i, String::new());
+                    } else {
+                        self.overrides.insert(i, format!("[history compressed]\n{summary}"));
+                        placed = true;
+                    }
+                }
+            }
+        }
+        self.sealed_upto = keep_from;
+    }
+
     pub fn render(&mut self, ledger: &Ledger, cfg: &CtxCfg, turn: u32) -> String {
         if cfg.mode == "append" {
             self.render_append(ledger, cfg)
@@ -60,6 +103,9 @@ impl Renderer {
         let mut out = String::new();
         for (i, e) in ledger.entries.iter().enumerate() {
             let text = self.overrides.get(&i).map(String::as_str).unwrap_or(&e.text);
+            if text.is_empty() && self.overrides.contains_key(&i) {
+                continue; // entry sealed behind the summary
+            }
             push_entry(&mut out, e.kind, text);
         }
         out

@@ -80,6 +80,20 @@ pub struct CtxCfg {
     /// at the head of the session. Subagents never get one.
     #[serde(default = "d_true")]
     pub bootstrap: bool,
+    /// Over-budget handling in append mode: "model" summarizes history with one
+    /// prompt-cached model call (the context is already in the provider's KV
+    /// cache, so the prefill is ~free); "structural" folds lines mechanically.
+    /// Model compaction falls back to structural if the call fails.
+    #[serde(default = "d_compact")]
+    pub compact: String,
+    #[serde(default = "d_compact_keep")]
+    pub compact_keep_last: usize,
+}
+fn d_compact() -> String {
+    "model".into()
+}
+fn d_compact_keep() -> usize {
+    10
 }
 fn d_true() -> bool {
     true
@@ -108,6 +122,8 @@ impl Default for CtxCfg {
             max_turns: d_turns(),
             result_cap_chars: d_result_cap(),
             bootstrap: true,
+            compact: d_compact(),
+            compact_keep_last: d_compact_keep(),
         }
     }
 }
