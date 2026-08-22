@@ -158,12 +158,19 @@ model = "default"
 
 impl Config {
     pub fn load(path: Option<&str>) -> Result<Config, String> {
+        // Lookup chain: explicit -c, ./haste.toml, ~/.haste.toml, embedded default —
+        // so `haste` works from any directory once ~/.haste.toml exists.
         let text = match path {
             Some(p) => std::fs::read_to_string(p).map_err(|e| format!("config {p}: {e}"))?,
-            None => match std::fs::read_to_string("haste.toml") {
-                Ok(t) => t,
-                Err(_) => DEFAULT_TOML.to_string(),
-            },
+            None => std::fs::read_to_string("haste.toml")
+                .or_else(|_| {
+                    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"));
+                    home.map_err(|_| ()).and_then(|h| {
+                        std::fs::read_to_string(std::path::Path::new(&h).join(".haste.toml"))
+                            .map_err(|_| ())
+                    })
+                })
+                .unwrap_or_else(|_| DEFAULT_TOML.to_string()),
         };
         let cfg: Config = toml::from_str(&text).map_err(|e| format!("config parse: {e}"))?;
         for verb in cfg.tool.keys() {
