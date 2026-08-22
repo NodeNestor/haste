@@ -113,6 +113,7 @@ pub fn run_session(
     };
     let mut ctx_cfg = cfg.context.clone();
     ctx_cfg.budget_tokens = budget;
+    ctx_cfg.cc = cfg.model.dialect == "cc-json";
 
     let root = session.root.clone();
     let ledger = &mut session.ledger;
@@ -223,7 +224,13 @@ pub fn run_session(
         // File legend and plan view go at the BOTTOM: they change as work
         // progresses, and anything that changes near the top of the document
         // would shift every byte after it and invalidate the prefix cache.
-        let user = format!("{}\n{}{}## NOW\nNext commands:\n", doc, ws.legend(), plan_view);
+        let user = if cc {
+            // fable-style transcripts end at the last TOOL RESULT; the model
+            // continues as ASSISTANT. No id legend (cc tools use paths).
+            format!("{}{}", doc, plan_view)
+        } else {
+            format!("{}\n{}{}## NOW\nNext commands:\n", doc, ws.legend(), plan_view)
+        };
         rep.render_us += t_r.elapsed().as_micros();
         rep.sent_tokens += est_tokens(&system) + est_tokens(&user);
 
@@ -591,6 +598,28 @@ fn action_of(cmd: &Cmd) -> String {
     }
 }
 
+/// The transcript rendering of a command in cc-json dialect — mirrors the
+/// "Name input={json}" style CC-trace finetunes saw in training.
+fn cc_action_of(cmd: &Cmd) -> String {
+    use serde_json::json;
+    let (name, input) = match cmd {
+        Cmd::Exec { line } => ("Bash", json!({"command": line})),
+        Cmd::Read { target, range } => match range {
+            Some((a, b)) => ("Read", json!({"file_path": target, "offset": a, "limit": b.saturating_sub(*a) + 1})),
+            None => ("Read", json!({"file_path": target})),
+        },
+        Cmd::New { path, body } => ("Write", json!({"file_path": path, "content": crate::tools::clip(body, 120)})),
+        Cmd::Replace { target, old, new } => (
+            "Edit",
+            json!({"file_path": target, "old_string": crate::tools::clip(old, 80), "new_string": crate::tools::clip(new, 80)}),
+        ),
+        Cmd::Grep { pat, target } => ("Grep", json!({"pattern": pat, "path": target})),
+        Cmd::Agent { task, .. } => ("Task", json!({"prompt": task})),
+        other => return action_of(other),
+    };
+    format!("{name} input={input}")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn exec_one(
     cmd: Cmd,
@@ -606,7 +635,7 @@ fn exec_one(
 ) {
     // Announce BEFORE executing: a slow tool must show up in the status bar
     // while it runs, not after it finishes.
-    let action = action_of(&cmd);
+    let action = if cfg.model.dialect == "cc-json" { cc_action_of(&cmd) } else { action_of(&cmd) };
     ctl.emit(Ev::Action(depth, crate::tools::clip(&action, 200)));
     let flat = |r: Result<String, String>| r.unwrap_or_else(|e| format!("err: {e}"));
     let mut file: Option<u32> = None;
@@ -777,8 +806,8 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
              {\"tool\":\"Write\",\"input\":{\"file_path\":\"...\",\"content\":\"...\"}}\n\
              {\"tool\":\"Edit\",\"input\":{\"file_path\":\"...\",\"old_string\":\"...\",\"new_string\":\"...\"}}\n\
              {\"tool\":\"Grep\",\"input\":{\"pattern\":\"...\",\"path\":\"...\"}}\n\
-             Several calls per message are allowed. Tool results arrive in the next message. \
-             A message containing no tool calls is your FINAL answer to the user — only send one when done. \
+             ONE tool call per message. The tool result arrives in the next message. \
+             A message containing no tool call is your FINAL answer to the user — only send one when done. \
              Edit old_string must match the file exactly once.\n",
         );
         if let Some(ps) = profile_system {
