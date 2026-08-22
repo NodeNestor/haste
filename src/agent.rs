@@ -11,6 +11,37 @@ use std::time::Instant;
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 120_000;
 const MAX_EMPTY_TURNS: u32 = 3;
 
+/// Live events for a UI. Headless runs pass Ctl::default() and pay nothing.
+pub enum Ev {
+    Turn(u32),
+    /// Raw model stream chunk (top-level agent only).
+    Delta(String),
+    Action(u8, String),
+    Result(u8, String),
+    /// End-of-run stats line.
+    Report(String),
+    Done(String),
+}
+
+#[derive(Clone, Default)]
+pub struct Ctl {
+    pub sink: Option<std::sync::mpsc::Sender<Ev>>,
+    pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Ctl {
+    fn emit(&self, ev: Ev) {
+        if let Some(s) = &self.sink {
+            let _ = s.send(ev);
+        }
+    }
+    fn stopped(&self) -> bool {
+        self.stop
+            .as_ref()
+            .map_or(false, |s| s.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Report {
     pub final_msg: String,
@@ -25,7 +56,7 @@ pub struct Report {
     pub commands: usize,
 }
 
-pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, depth: u8) -> Report {
+pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, depth: u8, ctl: Ctl) -> Report {
     let t_start = Instant::now();
     let prof = profile.and_then(|p| cfg.profile.get(p));
     let (max_turns, budget) = match prof {
@@ -51,7 +82,12 @@ pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, d
     let mut empty_turns = 0u32;
 
     for turn in 1..=max_turns {
+        if ctl.stopped() {
+            rep.final_msg = "(stopped)".into();
+            break;
+        }
         rep.turns = turn;
+        ctl.emit(Ev::Turn(turn));
         let t_r = Instant::now();
         let doc = renderer.render(&ledger, &ctx_cfg, turn);
         let user = format!("{}{}\n## NOW\nNext commands:\n", ws.legend(), doc);
@@ -61,6 +97,9 @@ pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, d
         let mut lexer = Lexer::new();
         let mut cmds: Vec<Cmd> = Vec::new();
         let stream_res = client.stream(&system, &user, &mut |delta| {
+            if depth == 0 {
+                ctl.emit(Ev::Delta(delta.to_string()));
+            }
             lexer.feed(delta, &mut cmds);
         });
         match stream_res {
@@ -112,20 +151,23 @@ pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, d
                         continue;
                     }
                     ledger.push(Kind::Action, turn, format!("A {profile} {task}"), None);
+                    ctl.emit(Ev::Action(depth, format!("A {profile} {task}")));
                     let cfg2 = Arc::clone(&cfg);
                     let root2 = root.clone();
                     let p2 = profile.clone();
                     let t2 = task.clone();
+                    let ctl2 = ctl.clone();
                     spawned.push((
                         profile,
-                        std::thread::spawn(move || run(cfg2, root2, &t2, Some(&p2), depth + 1)),
+                        std::thread::spawn(move || run(cfg2, root2, &t2, Some(&p2), depth + 1, ctl2)),
                     ));
                 }
-                other => exec_one(other, &mut ws, &mut ledger, &cfg, &client, task, turn, &ctx_cfg),
+                other => exec_one(other, &mut ws, &mut ledger, &cfg, &client, task, turn, &ctx_cfg, &ctl, depth),
             }
         }
         for (name, h) in spawned {
             let sub = h.join().unwrap_or_default();
+            ctl.emit(Ev::Result(depth, format!("[{name}] ({} turns) {}", sub.turns, first_lines(&sub.final_msg, 2))));
             ledger.push(
                 Kind::Result,
                 turn,
@@ -146,7 +188,24 @@ pub fn run(cfg: Arc<Config>, root: PathBuf, task: &str, profile: Option<&str>, d
         rep.final_msg = "(max turns reached)".into();
     }
     rep.wall_ms = t_start.elapsed().as_millis();
+    if depth == 0 {
+        ctl.emit(Ev::Report(format!(
+            "{} turns, {} cmds, {:.1}s wall | model {:.1}s | tools {:.1}s | sent ~{}t, out {}ch",
+            rep.turns,
+            rep.commands,
+            rep.wall_ms as f64 / 1000.0,
+            rep.model_ms as f64 / 1000.0,
+            rep.tool_ms as f64 / 1000.0,
+            rep.sent_tokens,
+            rep.out_chars
+        )));
+        ctl.emit(Ev::Done(rep.final_msg.clone()));
+    }
     rep
+}
+
+fn first_lines(s: &str, n: usize) -> String {
+    s.lines().take(n).collect::<Vec<_>>().join(" | ")
 }
 
 fn verb_of(cmd: &Cmd) -> char {
@@ -173,6 +232,8 @@ fn exec_one(
     task: &str,
     turn: u32,
     ctx: &crate::config::CtxCfg,
+    ctl: &Ctl,
+    depth: u8,
 ) {
     let (action, result, file) = match cmd {
         Cmd::Read { target, range } => {
@@ -244,6 +305,8 @@ fn exec_one(
         }
         Cmd::Agent { .. } | Cmd::Done { .. } => unreachable!("handled by caller"),
     };
+    ctl.emit(Ev::Action(depth, action.clone()));
+    ctl.emit(Ev::Result(depth, first_lines(&result, 3)));
     ledger.push(Kind::Action, turn, action, None);
     let result = cap(result, ctx.result_cap_chars);
     ledger.push(Kind::Result, turn, result, file);

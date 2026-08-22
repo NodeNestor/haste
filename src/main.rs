@@ -6,6 +6,7 @@ fn main() {
     let mut cfg_path: Option<String> = None;
     let mut profile: Option<String> = None;
     let mut root = std::env::current_dir().expect("cwd");
+    let mut want_tui = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -23,13 +24,12 @@ fn main() {
                 }
                 args.drain(i..(i + 2).min(args.len()));
             }
+            "--tui" => {
+                want_tui = true;
+                args.remove(i);
+            }
             _ => i += 1,
         }
-    }
-    let task = args.join(" ");
-    if task.trim().is_empty() {
-        eprintln!("usage: haste [-c haste.toml] [-p profile] [-C root] <task...>");
-        std::process::exit(2);
     }
     let cfg = match Config::load(cfg_path.as_deref()) {
         Ok(c) => Arc::new(c),
@@ -38,8 +38,18 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let task = args.join(" ");
 
-    let rep = agent::run(cfg, root, &task, profile.as_deref(), 0);
+    // No task = interactive. Explicit --tui always wins.
+    if want_tui || task.trim().is_empty() {
+        if let Err(e) = haste::tui::run(cfg, root) {
+            eprintln!("haste tui: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let rep = agent::run(cfg, root, &task, profile.as_deref(), 0, agent::Ctl::default());
 
     println!("{}", rep.final_msg);
     eprintln!(

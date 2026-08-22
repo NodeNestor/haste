@@ -1,6 +1,6 @@
-//! End-to-end loop test against an in-process mock model server, plus a
-//! renderer benchmark. The mock replies instantly, so (wall - model) ≈ pure
-//! harness overhead — the number this project exists to minimize.
+﻿//! End-to-end loop test against an in-process mock model server, plus a
+//! renderer benchmark. The mock replies instantly, so (wall - model) â‰ˆ pure
+//! harness overhead â€” the number this project exists to minimize.
 
 use haste::config::Config;
 use haste::ledger::{Kind, Ledger};
@@ -98,7 +98,7 @@ fn full_loop_fixes_typo_and_measures_overhead() {
     ]);
     let root = temp_repo();
     let cfg = Arc::new(cfg_for(port));
-    let rep = haste::agent::run(cfg, root.clone(), "fix the typo in greet.txt", None, 0);
+    let rep = haste::agent::run(cfg, root.clone(), "fix the typo in greet.txt", None, 0, haste::agent::Ctl::default());
 
     assert_eq!(rep.turns, 3, "final: {}", rep.final_msg);
     assert_eq!(rep.final_msg, "fixed the typo in greet.txt");
@@ -147,7 +147,7 @@ max_turns = 3
 "#
     );
     let cfg: Config = toml::from_str(&toml).unwrap();
-    let rep = haste::agent::run(Arc::new(cfg), root.clone(), "look around", Some("reader"), 1);
+    let rep = haste::agent::run(Arc::new(cfg), root.clone(), "look around", Some("reader"), 1, haste::agent::Ctl::default());
     assert_eq!(rep.final_msg, "tried");
     let untouched = std::fs::read_to_string(root.join("greet.txt")).unwrap();
     assert_eq!(untouched, "hello\nwrold\ngoodbye\n", "read-only profile must not edit");
@@ -155,8 +155,36 @@ max_turns = 3
 }
 
 #[test]
+fn event_stream_feeds_a_ui() {
+    let port = mock_server(vec![
+        "R greet.txt\n",
+        "D looked\n",
+    ]);
+    let root = temp_repo();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None };
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "look at greet.txt", None, 0, ctl);
+    assert_eq!(rep.final_msg, "looked");
+    let evs: Vec<haste::agent::Ev> = rx.try_iter().collect();
+    use haste::agent::Ev;
+    assert!(evs.iter().any(|e| matches!(e, Ev::Turn(1))), "no Turn event");
+    assert!(evs.iter().any(|e| matches!(e, Ev::Delta(_))), "no Delta events");
+    assert!(
+        evs.iter().any(|e| matches!(e, Ev::Action(0, a) if a == "R greet.txt")),
+        "no Action event"
+    );
+    assert!(evs.iter().any(|e| matches!(e, Ev::Result(0, _))), "no Result event");
+    assert!(evs.iter().any(|e| matches!(e, Ev::Report(_))), "no Report event");
+    assert!(
+        matches!(evs.last(), Some(Ev::Done(m)) if m == "looked"),
+        "Done must be last"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn renderer_stress_huge_ledger() {
-    // 10k entries, ~5MB of raw ledger text — a long session far past any budget.
+    // 10k entries, ~5MB of raw ledger text â€” a long session far past any budget.
     let mut ledger = Ledger::new(None);
     ledger.push(Kind::Task, 0, "stress task".into(), None);
     for turn in 1..=2500u32 {
@@ -240,3 +268,4 @@ fn renderer_bench_1000_entries() {
     // budget respected (approximately: est_tokens is chars/4)
     assert!(doc.len() / 4 < cfg.budget_tokens + 2000, "doc {} chars", doc.len());
 }
+

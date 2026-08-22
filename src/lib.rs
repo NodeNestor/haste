@@ -6,3 +6,4 @@ pub mod dsl;
 pub mod ledger;
 pub mod render;
 pub mod tools;
+pub mod tui;
