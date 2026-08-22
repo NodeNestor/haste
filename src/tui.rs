@@ -284,8 +284,20 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
     }
     queue!(out, terminal::Clear(terminal::ClearType::All), cursor::MoveTo(0, 0))?;
 
-    let stream_h = if app.stream_on { (h - 2) / 2 } else { 0 };
-    let log_h = h - 2 - stream_h - if stream_h > 0 { 1 } else { 0 };
+    // The stream pane only takes rows while something is streaming, and only
+    // as many as its content needs (capped at half the screen) — otherwise the
+    // log hugs the input line at the bottom, chat-style.
+    let live_lines: usize = app
+        .live
+        .lines()
+        .map(|l| 1 + l.len() / w.saturating_sub(1).max(1))
+        .sum();
+    let stream_h = if app.stream_on && app.running && live_lines > 0 {
+        (live_lines + 1).min((h - 2) / 2)
+    } else {
+        0
+    };
+    let log_h = h - 2 - stream_h;
 
     // Session log (top), bottom-anchored.
     let mut wrapped: Vec<(u8, String)> = Vec::new();
