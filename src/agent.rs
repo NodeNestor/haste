@@ -43,7 +43,7 @@ impl Ctl {
     fn stopped(&self) -> bool {
         self.stop
             .as_ref()
-            .map_or(false, |s| s.load(std::sync::atomic::Ordering::Relaxed))
+            .is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -354,7 +354,7 @@ pub fn run_session(
                 }
                 other => {
                     let key = crate::ledger::fnv(&format!("{other:?}"));
-                    if repeats.get(&key).map_or(false, |(n, _)| *n >= 5) {
+                    if repeats.get(&key).is_some_and(|(n, _)| *n >= 5) {
                         let msg = "(refused: this exact command has repeated 5+ times with the same result — do something DIFFERENT, or answer with D)";
                         ctl.emit(Ev::Result(depth, msg.into()));
                         ledger.push(Kind::Result, turn, msg.into(), None);
@@ -619,7 +619,7 @@ fn cap(s: String, max: usize) -> String {
 }
 
 fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str>) -> String {
-    let allow = |v: char| allowed.map_or(true, |a| a.contains(v));
+    let allow = |v: char| allowed.is_none_or(|a| a.contains(v));
     let mut s = String::from(
         "You are haste, a fast coding agent. You act ONLY by emitting command lines. \
          No prose, no markdown, no explanations — command lines only.\n",

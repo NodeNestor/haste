@@ -43,6 +43,12 @@ pub struct Lexer {
     done_msg: Option<String>,
 }
 
+impl Default for Lexer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Lexer {
     pub fn new() -> Lexer {
         Lexer { buf: String::new(), pending: None, done_msg: None }

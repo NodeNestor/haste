@@ -24,6 +24,12 @@ pub struct Renderer {
     last_seal_len: usize,
 }
 
+impl Default for Renderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Renderer {
     pub fn new() -> Renderer {
         Renderer {
@@ -207,7 +213,7 @@ fn push_entry(out: &mut String, kind: Kind, text: &str) {
         }
         Kind::Result => {
             out.push_str(text);
-            out.push_str("\n");
+            out.push('\n');
         }
         Kind::Pin => {
             out.push_str(text);
