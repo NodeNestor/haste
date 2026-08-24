@@ -413,6 +413,25 @@ impl Workspace {
         s
     }
 
+    /// Only files interned at index `from` and later — the append-mode turn
+    /// tail shows just what's new (usually nothing); the full table is baked
+    /// into each seal instead of being re-sent every turn.
+    pub fn legend_from(&self, from: usize) -> String {
+        if from >= self.files.len() {
+            return String::new();
+        }
+        let mut s = String::from("new files: ");
+        for (i, p) in self.files.iter().enumerate().skip(from) {
+            s.push_str(&format!("#{i}={} ", p.display()));
+        }
+        s.push('\n');
+        s
+    }
+
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
     fn legend_delta(&self) -> String {
         String::new() // ids appear inline as #id:line:text; full map lives in the header
     }

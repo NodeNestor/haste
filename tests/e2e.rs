@@ -808,3 +808,35 @@ fn completed_plan_step_triggers_phase_seal_under_budget() {
     assert!(doc.contains("PHASE BRIEF"), "summary missing from render:\n{doc}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn append_mode_dedups_identical_results_at_write_time() {
+    // Reading the same unchanged file twice: the second result must be a
+    // pointer, not a re-send — and the ledger (not just the render) holds it,
+    // so the frozen append-mode prefix never carried the duplicate at all.
+    let port = mock_server(vec![
+        "R big.txt\n",
+        "R big.txt\n",
+        "D compared\n",
+    ]);
+    let root = temp_repo();
+    let body: String = (1..=30).map(|i| format!("line number {i} with some padding text\n")).collect();
+    std::fs::write(root.join("big.txt"), body).unwrap();
+    let toml = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\n\
+         [context]\nmode = \"append\"\nbootstrap = false\n"
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "compare", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "compared");
+    let results: Vec<String> = session
+        .ledger
+        .entries
+        .iter()
+        .map(|e| e.text.chars().take(60).collect())
+        .collect();
+    let dups = session.ledger.entries.iter().filter(|e| e.text.starts_with("(= identical")).count();
+    assert_eq!(dups, 1, "second read must be a pointer: {results:?}");
+    let _ = std::fs::remove_dir_all(root);
+}

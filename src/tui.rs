@@ -32,6 +32,8 @@ struct App {
     stream_on: bool,
     scroll: usize,
     turn: u32,
+    /// Real billed context size (prompt_tokens) of the latest request.
+    ctx_tokens: u64,
     last_action: String,
     started: Option<Instant>,
     rx: Option<Receiver<Ev>>,
@@ -82,6 +84,7 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
         stream_on: true,
         scroll: 0,
         turn: 0,
+        ctx_tokens: 0,
         last_action: String::new(),
         started: None,
         rx: None,
@@ -153,6 +156,7 @@ fn drain_events(app: &mut App) -> bool {
             }
             Ev::Say(text) => app.push(PLAIN, text),
             Ev::Report(r) => app.push(DIM, format!("  {r}")),
+            Ev::Ctx(t) => app.ctx_tokens = t,
             Ev::Done(msg) => {
                 finish_run(app, msg);
                 return true;
@@ -381,10 +385,16 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
     } else {
         "idle".into()
     };
+    let ctx = if app.ctx_tokens > 0 {
+        format!(" · ctx {:.1}k", app.ctx_tokens as f64 / 1000.0)
+    } else {
+        String::new()
+    };
     let status = format!(
-        " {} · {} · stream {} ",
+        " {} · {}{} · stream {} ",
         app.root.display(),
         state,
+        ctx,
         if app.stream_on { "on" } else { "off" }
     );
     let bar: String = status.chars().take(w).collect();

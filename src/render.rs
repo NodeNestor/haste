@@ -39,29 +39,25 @@ impl Renderer {
         }
     }
 
-    /// Append mode only: over budget AND enough new history to be worth
-    /// sealing again (hysteresis — see MIN_ENTRIES_BETWEEN_SEALS).
-    pub fn over_budget(&self, ledger: &Ledger, cfg: &CtxCfg) -> bool {
-        self.seal_due(ledger, cfg, cfg.budget_tokens)
-    }
-
-    /// Would a seal at `threshold` tokens pay off right now? Same hysteresis
-    /// as over_budget — phase-boundary seals use a lower threshold so a long
-    /// task's steady-state context stays near the floor instead of sawtoothing
-    /// up to the full budget.
-    pub fn seal_due(&self, ledger: &Ledger, cfg: &CtxCfg, threshold: usize) -> bool {
+    /// Would a seal at `threshold` tokens pay off right now? (Append mode,
+    /// with hysteresis — see MIN_ENTRIES_BETWEEN_SEALS.) `real` is the
+    /// provider-reported prompt size of the last request — the ACTUAL billed
+    /// context — and always wins over the estimate when available.
+    pub fn seal_due(&self, ledger: &Ledger, cfg: &CtxCfg, threshold: usize, real: Option<usize>) -> bool {
         if cfg.mode != "append" {
             return false;
         }
         if ledger.entries.len() < self.last_seal_len + MIN_ENTRIES_BETWEEN_SEALS {
             return false;
         }
-        let total: usize = ledger
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| est_tokens(self.overrides.get(&i).map(String::as_str).unwrap_or(&e.text)))
-            .sum();
+        let total = real.unwrap_or_else(|| {
+            ledger
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| est_tokens(self.overrides.get(&i).map(String::as_str).unwrap_or(&e.text)))
+                .sum()
+        });
         total > threshold
     }
 

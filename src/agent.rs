@@ -23,6 +23,8 @@ pub enum Ev {
     /// End-of-run stats line.
     Report(String),
     Done(String),
+    /// Real billed context size (prompt_tokens) of the latest request.
+    Ctx(u64),
 }
 
 #[derive(Clone, Default)]
@@ -135,6 +137,12 @@ pub fn run_session(
     let mut degens = 0u32;
     let mut refusals = 0u32;
     let mut consec_errs = 0u32;
+    // Real billed context: prompt_tokens from the provider's last usage
+    // report. Budget decisions prefer this over any estimate.
+    let mut last_prompt: u64 = 0;
+    // Legend-delta cursor: files at index < this were already announced (or
+    // are baked into a seal); the per-turn tail only lists what's new.
+    let mut legend_base = 0usize;
     // "Now scanning..." endings: how often we have refused to stop on
     // trailing-ellipsis narration. Capped so a model that really does end
     // every sentence with dots can still finish.
@@ -232,9 +240,10 @@ pub fn run_session(
         } else {
             ctx_cfg.budget_tokens / 3
         };
+        let real_ctx = (last_prompt > 0).then_some(last_prompt as usize);
         let seal_now = ctx_cfg.compact == "model"
-            && (renderer.over_budget(ledger, &ctx_cfg)
-                || (phase_done && renderer.seal_due(ledger, &ctx_cfg, phase_floor)));
+            && (renderer.seal_due(ledger, &ctx_cfg, ctx_cfg.budget_tokens, real_ctx)
+                || (phase_done && renderer.seal_due(ledger, &ctx_cfg, phase_floor, real_ctx)));
         if seal_now {
             let doc = renderer.render(ledger, &ctx_cfg, turn);
             let cuser = format!(
@@ -250,7 +259,12 @@ pub fn run_session(
                 rep.tok_out += s.completion_tokens;
                 let summary = clean_final(summary.trim());
                 if !summary.is_empty() {
-                    renderer.seal_summary(ledger, ctx_cfg.compact_keep_last, summary);
+                    // Bake the FULL file legend into the seal — it rides the
+                    // cached prefix from here on, so the per-turn tail only
+                    // needs to announce newly interned files.
+                    let sealed = format!("{summary}\n{}", ws.legend()).trim().to_string();
+                    renderer.seal_summary(ledger, ctx_cfg.compact_keep_last, sealed);
+                    legend_base = ws.file_count();
                     rep.seals += 1;
                     let note = "(history compacted via prompt-cached model summary)";
                     ctl.emit(Ev::Result(depth, note.into()));
@@ -263,7 +277,12 @@ pub fn run_session(
         // File legend and plan view go at the BOTTOM: they change as work
         // progresses, and anything that changes near the top of the document
         // would shift every byte after it and invalidate the prefix cache.
-        let user = format!("{}\n{}{}## NOW\nNext commands:\n", doc, ws.legend(), plan_view);
+        // With model sealing, the legend is delta-only: each file announced
+        // once, the full table lives inside the seals.
+        let delta_legend = ctx_cfg.mode == "append" && ctx_cfg.compact == "model";
+        let legend = if delta_legend { ws.legend_from(legend_base) } else { ws.legend() };
+        let legend_snapshot = ws.file_count();
+        let user = format!("{}\n{}{}## NOW\nNext commands:\n", doc, legend, plan_view);
         rep.render_us += t_r.elapsed().as_micros();
         rep.sent_tokens += est_tokens(&system) + est_tokens(&user);
 
@@ -313,6 +332,20 @@ pub fn run_session(
         let (length_capped, degenerated) = match stream_res {
             Ok(s) => {
                 consec_errs = 0;
+                if delta_legend {
+                    legend_base = legend_snapshot;
+                }
+                if s.prompt_tokens > 0 {
+                    last_prompt = s.prompt_tokens;
+                    // Fold the real usage into the estimator (text-only
+                    // requests — image tokens would skew the ratio).
+                    if turn_images.is_empty() {
+                        crate::ledger::calibrate(system.len() + user.len(), s.prompt_tokens);
+                    }
+                    if depth == 0 {
+                        ctl.emit(Ev::Ctx(s.prompt_tokens));
+                    }
+                }
                 rep.model_ms += s.total_ms;
                 rep.ttft_ms_sum += s.ttft_ms;
                 rep.out_chars += s.out_chars;
@@ -891,9 +924,18 @@ fn exec_one(
         },
         Cmd::Agent { .. } | Cmd::Done { .. } | Cmd::View { .. } | Cmd::Say { .. } => unreachable!("handled by caller"),
     };
-    ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&result, 3), 400)));
+    let capped = cap(result, ctx.result_cap_chars);
+    // Append-time dedup: a result byte-identical to an earlier one becomes a
+    // pointer — append mode only; working_set dedups at render time and must
+    // keep the LATEST read as the full survivor, not the first.
+    let stored = if ctx.mode == "append" && capped.len() > 160 {
+        ledger.dup_of(&capped).unwrap_or(capped)
+    } else {
+        capped
+    };
+    ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&stored, 3), 400)));
     ledger.push(Kind::Action, turn, action, None);
-    ledger.push(Kind::Result, turn, cap(result, ctx.result_cap_chars), file);
+    ledger.push(Kind::Result, turn, stored, file);
 }
 
 /// Models habitually write "D let me check that\nW <url>" — but D swallows the
