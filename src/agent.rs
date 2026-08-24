@@ -552,6 +552,23 @@ pub fn run_session(
             // Every D gate below is skipped for solo-S mic-backs: those are
             // conversation, not completion.
             if !say_final {
+                // D alongside a DISCARDED prose block: "see summary above"
+                // pointing at text the user never saw. Bounce once so the
+                // model resends the report inside the D message itself.
+                if lexer.dropped >= 3 && ellipsis_refusals < 3 {
+                    ellipsis_refusals += 1;
+                    note(
+                        ledger,
+                        &ctl,
+                        depth,
+                        turn,
+                        format!(
+                            "(D refused — {} prose lines in this message were DISCARDED; the user never saw them. Resend the report INSIDE the D message — D captures every line after it to the end of the message)",
+                            lexer.dropped
+                        ),
+                    );
+                    continue;
+                }
                 // A D that merely repeats this turn's S, or trails off in an
                 // ellipsis, is narration — the model is mid-work and reached
                 // for the wrong verb ("S checking X…" + "D checking X…").

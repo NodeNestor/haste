@@ -940,3 +940,20 @@ fn talk_only_turn_with_open_plan_does_not_end_the_run() {
     assert!(ledger.contains("mid-task"), "no continue nudge");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn d_with_discarded_prose_block_is_bounced_until_resent() {
+    // The model narrates its report as prose (discarded) then D's with "see
+    // summary above" — the D must bounce so the report actually reaches the user.
+    let port = mock_server(vec![
+        "S here is the lay of the land:\nfirst finding in prose\nsecond finding in prose\nthird finding in prose\nD done - see summary above\n",
+        "D full report: alpha, beta, gamma\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "survey", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "full report: alpha, beta, gamma");
+    assert_eq!(rep.turns, 2, "D with discarded prose must bounce");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("Resend the report INSIDE the D"), "no bounce note");
+    let _ = std::fs::remove_dir_all(root);
+}
