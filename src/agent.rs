@@ -133,6 +133,10 @@ pub fn run_session(
     let mut degens = 0u32;
     let mut refusals = 0u32;
     let mut consec_errs = 0u32;
+    // "Now scanning..." endings: how often we have refused to stop on
+    // trailing-ellipsis narration. Capped so a model that really does end
+    // every sentence with dots can still finish.
+    let mut ellipsis_refusals = 0u32;
     // Images queued by V: attached to exactly the next request, then dropped —
     // the model sees them once and can V again if it needs another look.
     let mut images: Vec<(String, String)> = Vec::new();
@@ -381,26 +385,46 @@ pub fn run_session(
         // (dropped >= 3 means a whole prose block was lost — the model was
         // mid-report, not waiting on the user: let it retry with the note.)
         let mut say_final = false;
+        let mut nudge_continue = false;
         if tc.executed == 0
             && tc.pending.is_empty()
             && !tail.is_empty()
             && tail.iter().all(|c| matches!(c, Cmd::Say { .. }))
             && lexer.dropped < 3
         {
-            say_final = true;
-            tc.executed += tail.len();
-            let text = tail
-                .drain(..)
-                .map(|c| match c {
-                    Cmd::Say { text } => text,
-                    _ => unreachable!(),
+            // "Found 11 dirs. Now scanning each..." is announcing the NEXT
+            // step, not waiting on the user — a trailing ellipsis must not
+            // hand the mic back and end the run mid-task.
+            let trailing = tail
+                .iter()
+                .rev()
+                .find_map(|c| match c {
+                    Cmd::Say { text } => Some(text.trim_end()),
+                    _ => None,
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
-            tc.done = Some(text);
+                .is_some_and(|t| t.ends_with("...") || t.ends_with('…'));
+            if trailing && ellipsis_refusals < 3 {
+                ellipsis_refusals += 1;
+                nudge_continue = true;
+            } else {
+                say_final = true;
+                tc.executed += tail.len();
+                let text = tail
+                    .drain(..)
+                    .map(|c| match c {
+                        Cmd::Say { text } => text,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                tc.done = Some(text);
+            }
         }
         for cmd in tail.drain(..) {
             tc.dispatch(cmd);
+        }
+        if nudge_continue {
+            tc.note("(you sound mid-task — do the next step NOW with commands; S alone ends nothing but stops the work, D is only for finished results)".into());
         }
         rep.commands += tc.executed;
         rep.tool_ms += tc.tool_us / 1000;
@@ -451,7 +475,11 @@ pub fn run_session(
                     let s = s.trim().to_ascii_lowercase();
                     s == d || s.starts_with(&d) || d.starts_with(&s)
                 };
-                if !d.is_empty() && says.iter().any(echoes) {
+                let trailing = (d.trim_end().ends_with("...") || d.trim_end().ends_with('…')) && ellipsis_refusals < 3;
+                if trailing {
+                    ellipsis_refusals += 1;
+                }
+                if !d.is_empty() && (says.iter().any(echoes) || trailing) {
                     note(
                         ledger,
                         &ctl,

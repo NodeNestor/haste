@@ -760,3 +760,20 @@ fn narration_d_is_refused_and_scaffold_is_stripped() {
     assert!(ledger.contains("narrates work in progress"), "no refusal note");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn trailing_ellipsis_narration_does_not_end_the_run() {
+    // Solo-S "Now scanning..." announces the NEXT step — the run must
+    // continue, not hand the mic back mid-task.
+    let port = mock_server(vec![
+        "S Found 11 directories. Now scanning each for project indicators...\n",
+        "X echo scanned\nD 11 projects found, 3 are Rust\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "survey", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "11 projects found, 3 are Rust");
+    assert_eq!(rep.turns, 2, "ellipsis solo-S must not end turn 1");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("mid-task"), "no continue nudge in ledger");
+    let _ = std::fs::remove_dir_all(root);
+}
