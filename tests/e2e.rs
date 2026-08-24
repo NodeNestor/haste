@@ -313,7 +313,7 @@ fn outline_verb_maps_a_file() {
     let out = texts.iter().find(|t| t.starts_with("outline #")).expect("no outline result");
     assert!(out.contains("3: class Tool:") && out.contains("4:     def run(self):"), "{out}");
     assert!(!out.contains("return 1"), "body leaked: {out}");
-    let _ = session.ledger.entries.clear();
+    session.ledger.entries.clear();
     let _ = std::fs::remove_dir_all(root);
 }
 

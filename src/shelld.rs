@@ -9,7 +9,7 @@
 
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 const SENTINEL: &str = "<<HASTE:DONE";
@@ -73,44 +73,33 @@ pub fn run(line: &str, cwd: &Path, timeout_ms: u64) -> Option<(String, i32)> {
         let mut p = pool().lock().unwrap();
         p.iter().position(|d| d.key == key).map(|i| p.remove(i))
     };
-    let was_pooled = pooled.is_some();
+    // A pooled daemon can have died while idle: one retry on a fresh process.
+    // A FRESH daemon dying means powershell itself is broken here — give up.
+    let mut retries = u32::from(pooled.is_some());
     let mut d = pooled.or_else(|| spawn(&key, cwd))?;
-    match exec(&mut d, line, timeout_ms) {
-        Ok(res) => {
-            let mut p = pool().lock().unwrap();
-            if p.iter().filter(|x| x.key == key).count() < POOL_MAX {
-                p.push(d);
-            } else {
+    loop {
+        match exec(&mut d, line, timeout_ms) {
+            Ok(res) => {
+                let mut p = pool().lock().unwrap();
+                if p.iter().filter(|x| x.key == key).count() < POOL_MAX {
+                    p.push(d);
+                } else {
+                    let _ = d.child.lock().unwrap().kill();
+                }
+                return Some(res);
+            }
+            Err(Fail::Timeout(partial)) => {
                 let _ = d.child.lock().unwrap().kill();
+                let sep = if partial.is_empty() { "" } else { "\n" };
+                return Some((format!("{partial}{sep}(killed after {timeout_ms}ms)"), -1));
             }
-            Some(res)
-        }
-        Err(Fail::Timeout(partial)) => {
-            let _ = d.child.lock().unwrap().kill();
-            let sep = if partial.is_empty() { "" } else { "\n" };
-            Some((format!("{partial}{sep}(killed after {timeout_ms}ms)"), -1))
-        }
-        Err(Fail::Dead) => {
-            let _ = d.child.lock().unwrap().kill();
-            if !was_pooled {
-                return None; // a FRESH daemon died — powershell is broken here
-            }
-            // A pooled daemon can die while idle; one retry on a fresh process.
-            let mut f = spawn(&key, cwd)?;
-            match exec(&mut f, line, timeout_ms) {
-                Ok(res) => {
-                    pool().lock().unwrap().push(f);
-                    Some(res)
+            Err(Fail::Dead) => {
+                let _ = d.child.lock().unwrap().kill();
+                if retries == 0 {
+                    return None;
                 }
-                Err(Fail::Timeout(partial)) => {
-                    let _ = f.child.lock().unwrap().kill();
-                    let sep = if partial.is_empty() { "" } else { "\n" };
-                    Some((format!("{partial}{sep}(killed after {timeout_ms}ms)"), -1))
-                }
-                Err(Fail::Dead) => {
-                    let _ = f.child.lock().unwrap().kill();
-                    None
-                }
+                retries -= 1;
+                d = spawn(&key, cwd)?;
             }
         }
     }
@@ -126,18 +115,7 @@ fn exec(d: &mut Daemon, line: &str, timeout_ms: u64) -> Result<(String, i32), Fa
     {
         return Err(Fail::Dead);
     }
-    let fired = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let watchdog = {
-        let child = Arc::clone(&d.child);
-        let fired = Arc::clone(&fired);
-        std::thread::spawn(move || {
-            if rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)).is_err() {
-                fired.store(true, Ordering::SeqCst);
-                let _ = child.lock().unwrap().kill();
-            }
-        })
-    };
+    let (wd, disarm, fired) = crate::tools::watchdog(Arc::clone(&d.child), timeout_ms);
     let mut out = String::new();
     let mut result: Option<i32> = None;
     let mut buf = String::new();
@@ -156,8 +134,8 @@ fn exec(d: &mut Daemon, line: &str, timeout_ms: u64) -> Result<(String, i32), Fa
             }
         }
     }
-    let _ = tx.send(());
-    let _ = watchdog.join();
+    let _ = disarm.send(());
+    let _ = wd.join();
     match result {
         Some(code) => Ok((out, code)),
         None if fired.load(Ordering::SeqCst) => Err(Fail::Timeout(out)),

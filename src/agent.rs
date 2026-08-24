@@ -517,10 +517,12 @@ pub fn run_session(
         }
 
         if let Some(msg) = done {
-            // A D that merely repeats this turn's S is narration, not a final
-            // report — the model is mid-work and reached for the wrong verb
-            // ("S checking X…" + "D checking X…" ended real runs early).
+            // Every D gate below is skipped for solo-S mic-backs: those are
+            // conversation, not completion.
             if !say_final {
+                // A D that merely repeats this turn's S, or trails off in an
+                // ellipsis, is narration — the model is mid-work and reached
+                // for the wrong verb ("S checking X…" + "D checking X…").
                 let d = clean_final(&msg).to_ascii_lowercase();
                 let echoes = |s: &String| {
                     let s = s.trim().to_ascii_lowercase();
@@ -540,11 +542,9 @@ pub fn run_session(
                     );
                     continue;
                 }
-            }
-            // A pending background verify gets the first word on finishing:
-            // join it now, so a failing check still refuses the same D that
-            // rode in with the edits. Solo-S mic-backs are conversation.
-            if !say_final {
+                // A pending background verify gets the first word: join it
+                // now, so a failing check still refuses the same D that rode
+                // in with the edits.
                 if let Some(h) = verify_bg.take() {
                     if !h.is_finished() {
                         ctl.emit(Ev::Result(depth, "(waiting on auto-verify before finishing…)".into()));
@@ -557,26 +557,25 @@ pub fn run_session(
                         }
                     }
                 }
-            }
-            // The plan state machine gets the last word on finishing: verify
-            // any statuses changed THIS turn, then refuse D while steps are
-            // open. Solo-S mic-backs are conversation, not completion — exempt.
-            if cfg.plan.enforce && !say_final {
-                let (_, open) =
-                    plan_tick(&plan_path, &mut plan_seen, &cfg.exec.shell, &root, ledger, &ctl, depth, turn);
-                if !open.is_empty() {
-                    note(
-                        ledger,
-                        &ctl,
-                        depth,
-                        turn,
-                        format!(
-                            "(D refused — the plan has open steps: {}. Finish and mark them done, or edit {} to descope with status \"skip\". To narrate progress use S, not D)",
-                            open.join(", "),
-                            cfg.plan.file
-                        ),
-                    );
-                    continue;
+                // The plan state machine gets the last word: verify statuses
+                // changed THIS turn, then refuse D while steps are open.
+                if cfg.plan.enforce {
+                    let (_, open) =
+                        plan_tick(&plan_path, &mut plan_seen, &cfg.exec.shell, &root, ledger, &ctl, depth, turn);
+                    if !open.is_empty() {
+                        note(
+                            ledger,
+                            &ctl,
+                            depth,
+                            turn,
+                            format!(
+                                "(D refused — the plan has open steps: {}. Finish and mark them done, or edit {} to descope with status \"skip\". To narrate progress use S, not D)",
+                                open.join(", "),
+                                cfg.plan.file
+                            ),
+                        );
+                        continue;
+                    }
                 }
             }
             if !pending.is_empty() {
@@ -668,24 +667,18 @@ fn harvest(name: &str, sub: Report, ledger: &mut Ledger, ctl: &Ctl, depth: u8, t
 /// D swallows the rest of the stream, so a degenerating model can append
 /// hallucinated prompt scaffolding after its real answer. Cut at the first
 /// scaffold marker; nothing legitimate starts a line with these.
+/// Prompt scaffolding AND hallucinated tool-call XML: models bleed their
+/// prompt structure or tool-training syntax after a real answer — the final
+/// is cut at the first line starting with any of these.
+const SCAFFOLD_MARKERS: &[&str] = &[
+    "## TASK", "## LOG", "## NOW", "files: #", "<|", "<invoke", "</invoke", "<function_", "</function", "[TOOL_CALLS]",
+];
+
 fn clean_final(msg: &str) -> String {
     let mut out = Vec::new();
     for l in msg.lines() {
         let t = l.trim_start();
-        // Prompt scaffolding AND hallucinated tool-call XML (</invoke>,
-        // <function_...>, <|im_end|>): models bleed their tool-training
-        // syntax after a real answer — cut at the first scaffold line.
-        if t.starts_with("## TASK")
-            || t.starts_with("## LOG")
-            || t.starts_with("## NOW")
-            || t.starts_with("files: #")
-            || t.starts_with("<|")
-            || t.starts_with("<invoke")
-            || t.starts_with("</invoke")
-            || t.starts_with("<function_")
-            || t.starts_with("</function")
-            || t.trim_end() == "[TOOL_CALLS]"
-        {
+        if SCAFFOLD_MARKERS.iter().any(|m| t.starts_with(m)) {
             break;
         }
         out.push(l);
@@ -693,23 +686,8 @@ fn clean_final(msg: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
-fn verb_of(cmd: &Cmd) -> char {
-    match cmd {
-        Cmd::Read { .. } => 'R',
-        Cmd::Edit { .. } => 'E',
-        Cmd::Insert { .. } => 'I',
-        Cmd::New { .. } => 'N',
-        Cmd::Grep { .. } => 'G',
-        Cmd::Exec { .. } => 'X',
-        Cmd::Agent { .. } => 'A',
-        Cmd::Done { .. } => 'D',
-        Cmd::View { .. } => 'V',
-        Cmd::Say { .. } => 'S',
-        Cmd::Outline { .. } => 'O',
-        Cmd::Custom { verb, .. } => *verb,
-    }
-}
-
+/// Every action string starts with its verb letter, so the verb needs no
+/// second lookup table.
 fn action_of(cmd: &Cmd) -> String {
     match cmd {
         Cmd::Read { target, range } => match range {
@@ -769,7 +747,7 @@ impl TurnCtx<'_> {
     fn dispatch(&mut self, cmd: Cmd) {
         self.executed += 1;
         if let Some(allow) = self.allowed {
-            let v = verb_of(&cmd);
+            let v = action_of(&cmd).chars().next().unwrap_or(' ');
             if !allow.contains(&v) && v != 'D' {
                 self.ledger.push(Kind::Result, self.turn, format!("verb {v} not allowed in this profile"), None);
                 return;
@@ -851,7 +829,7 @@ impl TurnCtx<'_> {
                 }
                 let is_edit = matches!(other, Cmd::Edit { .. } | Cmd::Insert { .. } | Cmd::New { .. });
                 let t = Instant::now();
-                exec_one(other, self.ws, self.ledger, self.cfg, self.client, self.task, self.turn, self.ctx_cfg, self.ctl, self.depth);
+                self.exec_tool(other);
                 self.tool_us += t.elapsed().as_micros();
                 if is_edit && self.ledger.entries.last().is_some_and(|e| !e.text.starts_with("err")) {
                     self.edited = true;
@@ -876,66 +854,55 @@ impl TurnCtx<'_> {
             }
         }
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn exec_one(
-    cmd: Cmd,
-    ws: &mut Workspace,
-    ledger: &mut Ledger,
-    cfg: &Config,
-    client: &Client,
-    task: &str,
-    turn: u32,
-    ctx: &crate::config::CtxCfg,
-    ctl: &Ctl,
-    depth: u8,
-) {
-    // Announce BEFORE executing: a slow tool must show up in the status bar
-    // while it runs, not after it finishes.
-    let action = action_of(&cmd);
-    ctl.emit(Ev::Action(depth, crate::tools::clip(&action, 200)));
-    let flat = |r: Result<String, String>| r.unwrap_or_else(|e| format!("err: {e}"));
-    let mut file: Option<u32> = None;
-    let result = match cmd {
-        Cmd::Read { target, range } => {
-            let r = flat(ws.read(&target, range));
-            file = r.strip_prefix('#').and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok());
-            r
-        }
-        Cmd::Edit { target, a, b, body } => flat(ws.edit(&target, a, b, &body)),
-        Cmd::Insert { target, after, body } => flat(ws.insert(&target, after, &body)),
-        Cmd::New { path, body } => flat(ws.new_file(&path, &body)),
-        Cmd::Grep { pat, target } => flat(ws.grep(&pat, target.as_deref())),
-        Cmd::Outline { target } => flat(ws.outline(&target)),
-        Cmd::Exec { line } => run_shell(&line, &ws.root, DEFAULT_TOOL_TIMEOUT_MS, &cfg.exec.shell),
-        Cmd::Custom { verb, args } => match cfg.tool.get(&verb.to_string()) {
-            Some(t) => {
-                let line = t.cmd.replace("{args}", &args);
-                let raw = crate::tools::run_shell_env(&line, &ws.root, t.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS), &cfg.exec.shell, &t.env);
-                let spec = t.prune.as_deref().unwrap_or("");
-                if spec.split('|').any(|s| s.trim() == "distill") {
-                    distill(client, cfg, task, &prune(spec, &raw))
-                } else {
-                    prune(spec, &raw)
-                }
+    /// Run one workspace/shell command and land its (possibly dedup'd) result.
+    fn exec_tool(&mut self, cmd: Cmd) {
+        // Announce BEFORE executing: a slow tool must show up in the status
+        // bar while it runs, not after it finishes.
+        let action = action_of(&cmd);
+        self.ctl.emit(Ev::Action(self.depth, crate::tools::clip(&action, 200)));
+        let flat = |r: Result<String, String>| r.unwrap_or_else(|e| format!("err: {e}"));
+        let mut file: Option<u32> = None;
+        let result = match cmd {
+            Cmd::Read { target, range } => {
+                let r = flat(self.ws.read(&target, range));
+                file = r.strip_prefix('#').and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok());
+                r
             }
-            None => format!("err: unknown verb {verb}"),
-        },
-        Cmd::Agent { .. } | Cmd::Done { .. } | Cmd::View { .. } | Cmd::Say { .. } => unreachable!("handled by caller"),
-    };
-    let capped = cap(result, ctx.result_cap_chars);
-    // Append-time dedup: a result byte-identical to an earlier one becomes a
-    // pointer — append mode only; working_set dedups at render time and must
-    // keep the LATEST read as the full survivor, not the first.
-    let stored = if ctx.mode == "append" && capped.len() > 160 {
-        ledger.dup_of(&capped).unwrap_or(capped)
-    } else {
-        capped
-    };
-    ctl.emit(Ev::Result(depth, crate::tools::clip(&first_lines(&stored, 3), 400)));
-    ledger.push(Kind::Action, turn, action, None);
-    ledger.push(Kind::Result, turn, stored, file);
+            Cmd::Edit { target, a, b, body } => flat(self.ws.edit(&target, a, b, &body)),
+            Cmd::Insert { target, after, body } => flat(self.ws.insert(&target, after, &body)),
+            Cmd::New { path, body } => flat(self.ws.new_file(&path, &body)),
+            Cmd::Grep { pat, target } => flat(self.ws.grep(&pat, target.as_deref())),
+            Cmd::Outline { target } => flat(self.ws.outline(&target)),
+            Cmd::Exec { line } => run_shell(&line, &self.ws.root, DEFAULT_TOOL_TIMEOUT_MS, &self.cfg.exec.shell),
+            Cmd::Custom { verb, args } => match self.cfg.tool.get(&verb.to_string()) {
+                Some(t) => {
+                    let line = t.cmd.replace("{args}", &args);
+                    let raw = crate::tools::run_shell_env(&line, &self.ws.root, t.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS), &self.cfg.exec.shell, &t.env);
+                    let spec = t.prune.as_deref().unwrap_or("");
+                    if spec.split('|').any(|s| s.trim() == "distill") {
+                        distill(self.client, self.cfg, self.task, &prune(spec, &raw))
+                    } else {
+                        prune(spec, &raw)
+                    }
+                }
+                None => format!("err: unknown verb {verb}"),
+            },
+            Cmd::Agent { .. } | Cmd::Done { .. } | Cmd::View { .. } | Cmd::Say { .. } => unreachable!("handled by dispatch"),
+        };
+        let capped = cap(result, self.ctx_cfg.result_cap_chars);
+        // Append-time dedup: a result byte-identical to an earlier one becomes
+        // a pointer — append mode only; working_set dedups at render time and
+        // must keep the LATEST read as the full survivor, not the first.
+        let stored = if self.ctx_cfg.mode == "append" && capped.len() > 160 {
+            self.ledger.dup_of(&capped).unwrap_or(capped)
+        } else {
+            capped
+        };
+        self.ctl.emit(Ev::Result(self.depth, crate::tools::clip(&first_lines(&stored, 3), 400)));
+        self.ledger.push(Kind::Action, self.turn, action, None);
+        self.ledger.push(Kind::Result, self.turn, stored, file);
+    }
 }
 
 /// Models habitually write "D let me check that\nW <url>" — but D swallows the

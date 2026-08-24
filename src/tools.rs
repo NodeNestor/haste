@@ -459,6 +459,28 @@ fn region_report(id: u32, lines: &[String], start: usize, nnew: usize) -> String
     out
 }
 
+/// Kill `child` after `timeout_ms` unless disarmed first. Returns the guard
+/// (thread handle, disarm sender, fired flag); send + join to release it.
+pub(crate) fn watchdog(
+    child: Arc<Mutex<std::process::Child>>,
+    timeout_ms: u64,
+) -> (
+    std::thread::JoinHandle<()>,
+    std::sync::mpsc::Sender<()>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let f2 = Arc::clone(&fired);
+    let h = std::thread::spawn(move || {
+        if rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)).is_err() {
+            f2.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = child.lock().unwrap().kill();
+        }
+    });
+    (h, tx, fired)
+}
+
 /// Run a shell line, kill on timeout, merge stdout+stderr, report exit code.
 pub fn run_shell(line: &str, cwd: &Path, timeout_ms: u64, shell: &str) -> String {
     run_shell_env(line, cwd, timeout_ms, shell, &std::collections::BTreeMap::new())
@@ -504,16 +526,7 @@ pub fn run_shell_env(
         Err(e) => return format!("spawn failed: {e}"),
     };
     let child = Arc::new(Mutex::new(child));
-    let watchdog = {
-        let child = Arc::clone(&child);
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let h = std::thread::spawn(move || {
-            if rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)).is_err() {
-                let _ = child.lock().unwrap().kill();
-            }
-        });
-        (h, tx)
-    };
+    let guard = watchdog(Arc::clone(&child), timeout_ms);
     let (mut out_pipe, mut err_pipe) = {
         let mut c = child.lock().unwrap();
         (c.stdout.take().unwrap(), c.stderr.take().unwrap())
@@ -531,8 +544,8 @@ pub fn run_shell_env(
     }
     let err = err_h.join().unwrap_or_default();
     let status = child.lock().unwrap().wait();
-    let _ = watchdog.1.send(());
-    let _ = watchdog.0.join();
+    let _ = guard.1.send(());
+    let _ = guard.0.join();
     let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
     let mut text = out;
     if !err.is_empty() {
