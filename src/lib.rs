@@ -11,3 +11,4 @@ pub mod render;
 pub mod shelld;
 pub mod tools;
 pub mod tui;
+pub mod update;

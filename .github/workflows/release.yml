@@ -1,0 +1,31 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            asset: haste-windows-x86_64.exe
+            bin: target/release/haste.exe
+          - os: ubuntu-latest
+            asset: haste-linux-x86_64
+            bin: target/release/haste
+          - os: macos-latest
+            asset: haste-macos-aarch64
+            bin: target/release/haste
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - run: cargo test --release
+      - name: rename asset
+        shell: bash
+        run: cp "${{ matrix.bin }}" "${{ matrix.asset }}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}

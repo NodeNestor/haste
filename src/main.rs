@@ -12,10 +12,20 @@ fn main() {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "haste — micro agent harness for wafer-speed inference\n\n\
-             usage: haste [-c config.toml] [-p profile] [-C root] [--tui] [task...]\n\n\
+             usage: haste [-c config.toml] [-p profile] [-C root] [--tui] [task...]\n       haste update\n\n\
              With no task, opens the TUI in the current directory.\n\
              Config lookup: -c, ./haste.toml, ~/.haste.toml, built-in default."
         );
+        return;
+    }
+    if args.first().map(String::as_str) == Some("update") {
+        match haste::update::self_update() {
+            Ok(msg) => println!("haste: {msg}"),
+            Err(e) => {
+                eprintln!("haste: update failed — {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     let mut cfg_path: Option<String> = None;

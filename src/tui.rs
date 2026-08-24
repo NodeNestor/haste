@@ -96,8 +96,17 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
     };
     let mut dirty = true;
     let mut last_tick = Instant::now();
+    // One background release check per TUI session; at most one line arrives.
+    let mut update_rx = Some(crate::update::spawn_check());
 
     while !app.quit {
+        if let Some(rx) = &update_rx {
+            if let Ok(msg) = rx.try_recv() {
+                app.push(DIM, format!("  {msg}"));
+                update_rx = None;
+                dirty = true;
+            }
+        }
         if drain_events(&mut app) {
             dirty = true;
         }
