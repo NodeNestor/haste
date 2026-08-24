@@ -158,6 +158,12 @@ pub struct CtxCfg {
     pub compact: String,
     #[serde(default = "d_compact_keep")]
     pub compact_keep_last: usize,
+    /// Phase-boundary seal threshold: when a plan step completes and the doc
+    /// is over this many tokens, compact NOW instead of waiting for budget —
+    /// a long task's steady-state context stays near this floor.
+    /// 0 = auto (budget_tokens / 3).
+    #[serde(default)]
+    pub compact_phase_tokens: usize,
     /// Project instruction files (CLAUDE.md / AGENTS.md style) pinned into the
     /// bootstrap block when they exist at the workspace root, in this order.
     #[serde(default = "d_instruction_files")]
@@ -201,6 +207,7 @@ impl Default for CtxCfg {
             bootstrap: true,
             compact: d_compact(),
             compact_keep_last: d_compact_keep(),
+            compact_phase_tokens: 0,
             instruction_files: d_instruction_files(),
         }
     }

@@ -777,3 +777,34 @@ fn trailing_ellipsis_narration_does_not_end_the_run() {
     assert!(ledger.contains("mid-task"), "no continue nudge in ledger");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn completed_plan_step_triggers_phase_seal_under_budget() {
+    // Budget 100 is never hit, but the phase floor (compact_phase_tokens=10)
+    // is — so finishing step one must compact right at the boundary.
+    let port = mock_server(vec![
+        // Turn 1: plan with one verified step + padding work (arms hysteresis).
+        "N plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"s1\",\"what\":\"pad\",\"status\":\"todo\",\"verify\":\"echo ok\"}]}\n.\nX echo a\nX echo b\nX echo c\nX echo d\nX echo e\n",
+        // Turn 2: mark the step done — next turn top is the phase boundary.
+        "E 0 1:1\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"s1\",\"what\":\"pad\",\"status\":\"done\",\"verify\":\"echo ok\"}]}\n.\n",
+        // Turn 3, request 1: the phase-seal compaction call.
+        "PHASE BRIEF: step s1 finished; nothing pending.\n",
+        // Turn 3, request 2: the real turn.
+        "D phase sealed\n",
+    ]);
+    let root = temp_repo();
+    let toml = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\n\
+         [context]\nmode = \"append\"\nbudget_tokens = 100000\ncompact_phase_tokens = 10\nbootstrap = false\ncompact = \"model\"\ncompact_keep_last = 2\n"
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "do the phase", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "phase sealed");
+    assert_eq!(rep.seals, 1, "phase boundary must seal exactly once");
+    let mut wide = cfg.context.clone();
+    wide.budget_tokens = 100_000;
+    let doc = session.renderer.render(&session.ledger, &wide, 99);
+    assert!(doc.contains("PHASE BRIEF"), "summary missing from render:\n{doc}");
+    let _ = std::fs::remove_dir_all(root);
+}

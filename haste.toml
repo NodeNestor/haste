@@ -32,6 +32,7 @@ result_cap_chars = 12000 # hard cap on any single tool result, applied before pr
 # bootstrap = true       # pin a workspace orientation block (os/project/git/layout) at ledger head
 # compact = "model"      # over-budget: "model" (prompt-cached self-summary) | "structural" (mechanical folding)
 # compact_keep_last = 10 # ledger entries kept verbatim behind a model-compaction seal
+# compact_phase_tokens = 0 # phase-boundary seal floor: completed plan step + doc over this -> compact now (0 = budget/3)
 # instruction_files = ["HASTE.md", "AGENTS.md", "CLAUDE.md"]  # project instructions pinned into bootstrap when present
 
 [exec]

@@ -42,6 +42,14 @@ impl Renderer {
     /// Append mode only: over budget AND enough new history to be worth
     /// sealing again (hysteresis — see MIN_ENTRIES_BETWEEN_SEALS).
     pub fn over_budget(&self, ledger: &Ledger, cfg: &CtxCfg) -> bool {
+        self.seal_due(ledger, cfg, cfg.budget_tokens)
+    }
+
+    /// Would a seal at `threshold` tokens pay off right now? Same hysteresis
+    /// as over_budget — phase-boundary seals use a lower threshold so a long
+    /// task's steady-state context stays near the floor instead of sawtoothing
+    /// up to the full budget.
+    pub fn seal_due(&self, ledger: &Ledger, cfg: &CtxCfg, threshold: usize) -> bool {
         if cfg.mode != "append" {
             return false;
         }
@@ -54,7 +62,7 @@ impl Renderer {
             .enumerate()
             .map(|(i, e)| est_tokens(self.overrides.get(&i).map(String::as_str).unwrap_or(&e.text)))
             .sum();
-        total > cfg.budget_tokens
+        total > threshold
     }
 
     /// Seal history behind a model-written summary. Render-layer only — the
@@ -106,8 +114,9 @@ impl Renderer {
             .map(|(i, e)| est_tokens(self.overrides.get(&i).map(String::as_str).unwrap_or(&e.text)))
             .sum();
         if total > cfg.budget_tokens {
-            // Reseal: fold results older than the tail (last 25% of budget), once.
-            let keep_from = ledger.entries.len().saturating_sub(8).max(self.sealed_upto);
+            // Structural reseal (model compaction failed or is off): fold old
+            // results, keeping the same tail the model seal would keep.
+            let keep_from = ledger.entries.len().saturating_sub(cfg.compact_keep_last).max(self.sealed_upto);
             for (i, e) in ledger.entries.iter().enumerate() {
                 if i >= keep_from || i < self.sealed_upto {
                     continue;

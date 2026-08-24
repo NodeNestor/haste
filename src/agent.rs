@@ -63,6 +63,8 @@ pub struct Report {
     pub tok_in: u64,
     pub tok_cached: u64,
     pub tok_out: u64,
+    /// History seals (model compactions) performed during the run.
+    pub seals: u32,
 }
 
 /// A continuable session: the ledger, workspace, and renderer survive across
@@ -206,12 +208,34 @@ pub fn run_session(
             }
         }
 
-        // Model compaction: when over budget, ask the model to summarize its
-        // own history. The prompt is the SAME document the provider's KV cache
-        // already holds plus one appended instruction — prefill is ~free, we
-        // pay only the summary's decode. The ledger stays lossless; the
-        // summary is a render-layer seal. Falls back to structural folding.
-        if ctx_cfg.compact == "model" && renderer.over_budget(ledger, &ctx_cfg) {
+        // Plan tick: verify fresh "done"s, get the always-visible view. Runs
+        // BEFORE compaction so a completed step can trigger a phase seal.
+        let dones_before = plan_seen.values().filter(|s| s.as_str() == "done").count();
+        let (plan_view, _) = if cfg.plan.enforce {
+            plan_tick(&plan_path, &mut plan_seen, &cfg.exec.shell, &root, ledger, &ctl, depth, turn)
+        } else {
+            (String::new(), Vec::new())
+        };
+        let phase_done = plan_seen.values().filter(|s| s.as_str() == "done").count() > dones_before;
+
+        // Model compaction: ask the model to summarize its own history. The
+        // prompt is the SAME document the provider's KV cache already holds
+        // plus one appended instruction — prefill is ~free, we pay only the
+        // summary's decode. The ledger stays lossless; the summary is a
+        // render-layer seal. Falls back to structural folding.
+        // Triggers: over budget, OR a plan step just completed and the doc is
+        // past the phase floor — that phase's raw history is dead weight, and
+        // the model summarizes best right at the boundary. Long tasks then
+        // hold a near-constant context instead of sawtoothing to the budget.
+        let phase_floor = if ctx_cfg.compact_phase_tokens > 0 {
+            ctx_cfg.compact_phase_tokens
+        } else {
+            ctx_cfg.budget_tokens / 3
+        };
+        let seal_now = ctx_cfg.compact == "model"
+            && (renderer.over_budget(ledger, &ctx_cfg)
+                || (phase_done && renderer.seal_due(ledger, &ctx_cfg, phase_floor)));
+        if seal_now {
             let doc = renderer.render(ledger, &ctx_cfg, turn);
             let cuser = format!(
                 "{doc}\n## COMPRESS\nCompact your working memory: write a terse briefing (max 40 lines) \
@@ -227,18 +251,12 @@ pub fn run_session(
                 let summary = clean_final(summary.trim());
                 if !summary.is_empty() {
                     renderer.seal_summary(ledger, ctx_cfg.compact_keep_last, summary);
+                    rep.seals += 1;
                     let note = "(history compacted via prompt-cached model summary)";
                     ctl.emit(Ev::Result(depth, note.into()));
                 }
             }
         }
-
-        // Plan tick: verify fresh "done"s, get the always-visible view.
-        let (plan_view, _) = if cfg.plan.enforce {
-            plan_tick(&plan_path, &mut plan_seen, &cfg.exec.shell, &root, ledger, &ctl, depth, turn)
-        } else {
-            (String::new(), Vec::new())
-        };
 
         let t_r = Instant::now();
         let doc = renderer.render(ledger, &ctx_cfg, turn);
@@ -573,8 +591,9 @@ pub fn run_session(
         } else {
             format!("~{}t sent", rep.sent_tokens)
         };
+        let seals = if rep.seals > 0 { format!(" · {} seal{}", rep.seals, if rep.seals == 1 { "" } else { "s" }) } else { String::new() };
         ctl.emit(Ev::Report(format!(
-            "{} turn{} · {} cmd{} · {:.1}s · {tokens}",
+            "{} turn{} · {} cmd{} · {:.1}s · {tokens}{seals}",
             rep.turns,
             if rep.turns == 1 { "" } else { "s" },
             rep.commands,
