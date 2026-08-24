@@ -12,6 +12,8 @@ const DEFAULT_TOOL_TIMEOUT_MS: u64 = 120_000;
 const MAX_EMPTY_TURNS: u32 = 3;
 
 /// Live events for a UI. Headless runs pass Ctl::default() and pay nothing.
+/// Serializes to one-line JSON for `--events` (machine supervisors, fleets).
+#[derive(serde::Serialize)]
 pub enum Ev {
     Turn(u32),
     /// Raw model stream chunk (top-level agent only).
@@ -891,6 +893,16 @@ impl TurnCtx<'_> {
                 ));
             }
             other => {
+                // Polling tools repeat identical results by design — the loop
+                // breaker must not strangle a mailbox watcher.
+                let is_poll = matches!(&other, Cmd::Custom { verb, .. }
+                    if self.cfg.tool.get(&verb.to_string()).is_some_and(|t| t.poll));
+                if is_poll {
+                    let t = Instant::now();
+                    self.exec_tool(other);
+                    self.tool_us += t.elapsed().as_micros();
+                    return;
+                }
                 let key = crate::ledger::fnv(&format!("{other:?}"));
                 if self.repeats.get(&key).is_some_and(|(n, _)| *n >= 5) {
                     *self.refusals += 1;

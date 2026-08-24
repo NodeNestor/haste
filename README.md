@@ -111,3 +111,25 @@ context window, so the agent can read its own harness in a single `R`.
 Fair-code, under the [Sustainable Use License](LICENSE): free to use, modify,
 and share for internal and personal purposes. Selling haste or offering it as
 a hosted service requires a commercial license from NodeNestor.
+
+## swift — the fleet layer
+
+The workspace ships a second binary: **swift**, a hyper-light fleet manager.
+A `fleet.toml` declares named agents — each with its own workspace, haste
+config, and optional profile. **Persistent** agents keep one session across
+tasks (memory, interned files, sealed history — a follow-up task costs tens
+of tokens, not a re-orientation); one-shot agents start clean. Tasks are text
+files dropped in `<root>/.swift/inbox/` (or `swift send <agent> <task>`);
+events from all agents multiplex into one log. Polling mods (`poll = true`
+exempts a tool from the loop breaker) let a persistent agent watch a mailbox
+forever on its own.
+
+```toml
+[agent.coder]
+root = "C:/work/api"
+persistent = true
+
+[agent.scout]
+root = "C:/work/research"
+persistent = false
+```

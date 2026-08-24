@@ -12,20 +12,30 @@ jobs:
           - os: windows-latest
             asset: haste-windows-x86_64.exe
             bin: target/release/haste.exe
+            swift_asset: swift-windows-x86_64.exe
+            swift_bin: target/release/swift.exe
           - os: ubuntu-latest
             asset: haste-linux-x86_64
             bin: target/release/haste
+            swift_asset: swift-linux-x86_64
+            swift_bin: target/release/swift
           - os: macos-latest
             asset: haste-macos-aarch64
             bin: target/release/haste
+            swift_asset: swift-macos-aarch64
+            swift_bin: target/release/swift
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: cargo build --release
-      - run: cargo test --release
+      - run: cargo build --release --workspace
+      - run: cargo test --release --workspace
       - name: rename asset
         shell: bash
-        run: cp "${{ matrix.bin }}" "${{ matrix.asset }}"
+        run: |
+          cp "${{ matrix.bin }}" "${{ matrix.asset }}"
+          cp "${{ matrix.swift_bin }}" "${{ matrix.swift_asset }}"
       - uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: |
+            ${{ matrix.asset }}
+            ${{ matrix.swift_asset }}

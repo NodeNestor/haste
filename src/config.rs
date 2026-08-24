@@ -235,6 +235,11 @@ pub struct ToolCfg {
     /// command line routes to this tool instead of the built-in.
     #[serde(default, rename = "override")]
     pub override_native: bool,
+    /// Polling tool: identical repeated results are its NORMAL behavior
+    /// ("no new mail"), so the loop breaker leaves it alone. The tool's own
+    /// command controls pacing (sleep/long-poll inside it).
+    #[serde(default)]
+    pub poll: bool,
 }
 
 #[derive(Deserialize, Clone)]

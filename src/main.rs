@@ -50,6 +50,7 @@ fn main() {
     let mut profile: Option<String> = None;
     let mut root = std::env::current_dir().expect("cwd");
     let mut want_tui = false;
+    let mut events = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -69,6 +70,10 @@ fn main() {
             }
             "--tui" => {
                 want_tui = true;
+                args.remove(i);
+            }
+            "--events" => {
+                events = true;
                 args.remove(i);
             }
             _ => i += 1,
@@ -96,9 +101,29 @@ fn main() {
         return;
     }
 
-    let rep = agent::run(cfg, root, &task, profile.as_deref(), 0, agent::Ctl::default());
+    // --events: one JSON line per agent event on stdout — the interface a
+    // fleet manager or any supervisor scripts against.
+    let (ctl, ev_thread) = if events {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let h = std::thread::spawn(move || {
+            for ev in rx {
+                if let Ok(line) = serde_json::to_string(&ev) {
+                    println!("{line}");
+                }
+            }
+        });
+        (agent::Ctl { sink: Some(tx), ..Default::default() }, Some(h))
+    } else {
+        (agent::Ctl::default(), None)
+    };
+    let rep = agent::run(cfg, root, &task, profile.as_deref(), 0, ctl);
+    if let Some(h) = ev_thread {
+        let _ = h.join(); // sender dropped with the run's Ctl — drains cleanly
+    }
 
-    println!("{}", rep.final_msg);
+    if !events {
+        println!("{}", rep.final_msg);
+    }
     eprintln!(
         "\n-- haste: {} turns, {} cmds, {:.1}s wall | model {:.1}s (ttft sum {:.1}s) | tools {:.1}s | render {:.1}ms | in {}t ({}t cached) out {}t (~{}t est, {}ch) --",
         rep.turns,
