@@ -132,6 +132,7 @@ pub fn run_session(
     let mut empty_turns = 0u32;
     let mut degens = 0u32;
     let mut refusals = 0u32;
+    let mut consec_errs = 0u32;
     // Images queued by V: attached to exactly the next request, then dropped —
     // the model sees them once and can V again if it needs another look.
     let mut images: Vec<(String, String)> = Vec::new();
@@ -288,6 +289,7 @@ pub fn run_session(
         });
         let (length_capped, degenerated) = match stream_res {
             Ok(s) => {
+                consec_errs = 0;
                 rep.model_ms += s.total_ms;
                 rep.ttft_ms_sum += s.ttft_ms;
                 rep.out_chars += s.out_chars;
@@ -298,8 +300,19 @@ pub fn run_session(
                 (fr == Some("length"), fr == Some("degenerate"))
             }
             Err(e) => {
+                consec_errs += 1;
                 tc.note(format!("model error: {e}"));
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                if consec_errs >= 6 {
+                    rep.final_msg = format!(
+                        "(aborted: the model endpoint failed {consec_errs} times in a row — is the server at {} up?)",
+                        cfg.model.base_url
+                    );
+                    break;
+                }
+                // Endpoint hiccups must not burn turns: back off (0.5s
+                // doubling to a 4s cap) and retry the SAME turn.
+                std::thread::sleep(std::time::Duration::from_millis(500u64 << (consec_errs - 1).min(3)));
+                i -= 1;
                 continue;
             }
         };
