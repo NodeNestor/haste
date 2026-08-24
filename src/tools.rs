@@ -172,6 +172,9 @@ impl Workspace {
             }
             None => self.root.clone(),
         };
+        if let Some(out) = self.rg(pat, &re, &base) {
+            return Ok(out);
+        }
         let mut hits = Vec::new();
         let root_target = base.clone();
         let mut stack = vec![base];
@@ -242,6 +245,73 @@ impl Workspace {
             out.push_str(&note);
         }
         Ok(out)
+    }
+
+    /// Delegate G to ripgrep when it is installed: same regex syntax (rg is
+    /// built on the identical Rust regex crate), but a parallel, gitignore-
+    /// aware walk that is orders of magnitude faster on big trees. Returns
+    /// None when rg is missing or errors, and the built-in walker takes over.
+    fn rg(&mut self, pat: &str, re: &Regex, base: &Path) -> Option<String> {
+        use std::sync::OnceLock;
+        static HAVE_RG: OnceLock<bool> = OnceLock::new();
+        let have = *HAVE_RG.get_or_init(|| {
+            Command::new("rg").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok()
+        });
+        if !have {
+            return None;
+        }
+        let mut c = Command::new("rg");
+        c.current_dir(&self.root)
+            .arg("-n")
+            .arg("--no-heading")
+            .arg("--no-messages")
+            .arg("--max-filesize")
+            .arg(GREP_MAX_FILE_BYTES.to_string());
+        for d in SKIP_DIRS {
+            c.arg("-g").arg(format!("!{d}"));
+        }
+        c.arg("-e").arg(pat);
+        if base != self.root.as_path() {
+            // Relative target keeps printed paths relative (a Windows drive
+            // colon in absolute paths would break path:line:text splitting).
+            c.arg(base.strip_prefix(&self.root).ok()?);
+        }
+        let out = c.output().ok()?;
+        match out.status.code() {
+            Some(0) => {}
+            Some(1) => return Some(format!("no hits for /{pat}/")),
+            _ => return None, // rg error — let the built-in walker try
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut hits = Vec::new();
+        let mut extra = 0usize;
+        for l in text.lines() {
+            let Some((path, rest)) = l.split_once(':') else { continue };
+            let Some((ln, content)) = rest.split_once(':') else { continue };
+            if hits.len() >= GREP_MAX_HITS {
+                extra += 1;
+                continue;
+            }
+            let id = self.intern(&PathBuf::from(path));
+            let shown = if content.len() > GREP_LINE_WINDOW {
+                match re.find(content) {
+                    Some(m) => window(content, m.start(), m.end(), 40, 120),
+                    None => clip(content.trim(), GREP_LINE_WINDOW),
+                }
+            } else {
+                content.trim().to_string()
+            };
+            hits.push(format!("#{id}:{ln}:{shown}"));
+        }
+        if hits.is_empty() {
+            return Some(format!("no hits for /{pat}/"));
+        }
+        let mut res = self.legend_delta();
+        res.push_str(&hits.join("\n"));
+        if extra > 0 {
+            res.push_str(&format!("\n(+{extra} more hits not shown — narrow the pattern or target)"));
+        }
+        Some(res)
     }
 
     /// O verb: signature outline of one file, or of every code file directly

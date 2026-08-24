@@ -135,7 +135,6 @@ pub fn run_session(
     // are harvested at the top of each turn; D waits for stragglers.
     // (profile, task, handle) — task kept for duplicate-spawn refusal.
     let mut pending: Vec<(String, String, std::thread::JoinHandle<Report>)> = Vec::new();
-    const MAX_CONCURRENT_SUBAGENTS: usize = 4;
     // Loop breaker: per exact command, how many times in a row it produced the
     // exact same result. 3 → warn; 5 → refuse to execute it again.
     let mut repeats: std::collections::HashMap<u64, (u32, u64)> = std::collections::HashMap::new();
@@ -229,12 +228,45 @@ pub fn run_session(
 
         let turn_images = std::mem::take(&mut images);
         let mut lexer = Lexer::new();
-        let mut cmds: Vec<Cmd> = Vec::new();
+        // S and D wait for stream end (solo-S detection and rescue_done need
+        // the whole turn); every other command executes the moment the lexer
+        // completes it, WHILE the model is still generating — tool time hides
+        // inside generation time instead of following it.
+        let mut tail: Vec<Cmd> = Vec::new();
+        let mut chunk: Vec<Cmd> = Vec::new();
+        let mut tc = TurnCtx {
+            cfg: &cfg,
+            root: &root,
+            ledger: &mut *ledger,
+            ws: &mut *ws,
+            client: &client,
+            ctl: &ctl,
+            ctx_cfg: &ctx_cfg,
+            allowed: &allowed,
+            task,
+            depth,
+            turn,
+            images: &mut images,
+            pending: &mut pending,
+            repeats: &mut repeats,
+            refusals: &mut refusals,
+            done: None,
+            edited: false,
+            executed: 0,
+            tool_us: 0,
+        };
         let stream_res = client.stream(&system, &user, &turn_images, &mut |delta| {
-            if depth == 0 {
-                ctl.emit(Ev::Delta(delta.to_string()));
+            if tc.depth == 0 {
+                tc.ctl.emit(Ev::Delta(delta.to_string()));
             }
-            lexer.feed(delta, &mut cmds);
+            lexer.feed(delta, &mut chunk);
+            for cmd in chunk.drain(..) {
+                if matches!(cmd, Cmd::Say { .. } | Cmd::Done { .. }) {
+                    tail.push(cmd);
+                } else {
+                    tc.dispatch(cmd);
+                }
+            }
         });
         let (length_capped, degenerated) = match stream_res {
             Ok(s) => {
@@ -248,13 +280,13 @@ pub fn run_session(
                 (fr == Some("length"), fr == Some("degenerate"))
             }
             Err(e) => {
-                note(ledger, &ctl, depth, turn, format!("model error: {e}"));
+                tc.note(format!("model error: {e}"));
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             }
         };
-        lexer.finish(&mut cmds);
-        rescue_done(&mut cmds, &cfg);
+        lexer.finish(&mut tail);
+        rescue_done(&mut tail, &cfg);
 
         if degenerated {
             degens += 1;
@@ -265,10 +297,10 @@ pub fn run_session(
                 2 => "(collapsed again — reply with ONE short command only, e.g. `X dir`)".to_string(),
                 n => format!("(repetition collapse #{n} — emit a single tiny command, nothing else)"),
             };
-            note(ledger, &ctl, depth, turn, note_text);
-            // Complete commands parsed before the collapse still execute below,
-            // but a D is dropped — its message may be full of the spam tail.
-            cmds.retain(|c| !matches!(c, Cmd::Done { .. }));
+            tc.note(note_text);
+            // Commands parsed before the collapse already executed mid-stream;
+            // a deferred D is dropped — its message may be full of the spam tail.
+            tail.retain(|c| !matches!(c, Cmd::Done { .. }));
             // A stuck model produces the same collapse forever — stop burning
             // turns and tell the user instead of retrying unboundedly.
             if degens >= 6 {
@@ -277,20 +309,20 @@ pub fn run_session(
                 break;
             }
             // A spam-only turn retries without counting toward the empty-turn abort.
-            if cmds.is_empty() {
+            if tc.executed == 0 && tail.is_empty() {
                 continue;
             }
         } else {
             degens = 0;
         }
 
-        if cmds.is_empty() {
+        if tc.executed == 0 && tail.is_empty() {
             empty_turns += 1;
             if empty_turns >= MAX_EMPTY_TURNS {
                 rep.final_msg = "(aborted: model produced no commands)".into();
                 break;
             }
-            ledger.push(
+            tc.ledger.push(
                 Kind::Result,
                 turn,
                 "no commands parsed — plain prose is discarded. Use S <text> to talk to the user, or D to finish".into(),
@@ -299,18 +331,19 @@ pub fn run_session(
             continue;
         }
         empty_turns = 0;
-        rep.commands += cmds.len();
 
-        let t_tools = Instant::now();
-        let mut done: Option<String> = None;
-        let mut edited = false;
-        let mut say_final = false;
         // A turn that is ONLY talk (S with no work and no subagents pending)
         // means the model is waiting on the user: hand the mic back instead of
         // looping into ever-rephrased clarification questions.
-        if pending.is_empty() && cmds.iter().all(|c| matches!(c, Cmd::Say { .. })) && !cmds.is_empty() {
+        let mut say_final = false;
+        if tc.executed == 0
+            && tc.pending.is_empty()
+            && !tail.is_empty()
+            && tail.iter().all(|c| matches!(c, Cmd::Say { .. }))
+        {
             say_final = true;
-            let text = cmds
+            tc.executed += tail.len();
+            let text = tail
                 .drain(..)
                 .map(|c| match c {
                     Cmd::Say { text } => text,
@@ -318,124 +351,23 @@ pub fn run_session(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            done = Some(text);
+            tc.done = Some(text);
         }
-        for cmd in cmds {
-            if let Some(allow) = &allowed {
-                let v = verb_of(&cmd);
-                if !allow.contains(&v) && v != 'D' {
-                    ledger.push(Kind::Result, turn, format!("verb {v} not allowed in this profile"), None);
-                    continue;
-                }
-            }
-            match cmd {
-                Cmd::Done { msg } => done = Some(msg),
-                Cmd::Say { text } => {
-                    if depth == 0 {
-                        ctl.emit(Ev::Say(text.clone()));
-                    }
-                    ledger.push(Kind::Result, turn, format!("(you told the user: {text})"), None);
-                }
-                Cmd::View { target } => {
-                    let act = format!("V {target}");
-                    ctl.emit(Ev::Action(depth, act.clone()));
-                    ledger.push(Kind::Action, turn, act, None);
-                    let result = match ws.load_image(&target) {
-                        Ok((id, mime, b64, bytes)) => {
-                            images.push((mime, b64));
-                            format!("(image #{id} attached — you will SEE it in the next turn; {}KB)", bytes / 1024)
-                        }
-                        Err(e) => format!("err: {e}"),
-                    };
-                    note(ledger, &ctl, depth, turn, result);
-                }
-                Cmd::Agent { profile, task } => {
-                    if depth >= 2 {
-                        ledger.push(Kind::Result, turn, "subagent depth limit reached".into(), None);
-                        continue;
-                    }
-                    if !cfg.profile.contains_key(&profile) {
-                        ledger.push(Kind::Result, turn, format!("no profile '{profile}'"), None);
-                        continue;
-                    }
-                    // The spawn-storm guards: an identical spawn while the
-                    // first is still running is a model mistake, not a wish
-                    // for two of them — and concurrency is capped.
-                    let norm = |s: &str| s.trim_matches('"').trim().to_ascii_lowercase();
-                    if pending.iter().any(|(p, t, _)| *p == profile && norm(t) == norm(&task)) {
-                        let msg = format!("({profile} is ALREADY RUNNING on that task — its brief arrives in a later turn; do not spawn it again)");
-                        note(ledger, &ctl, depth, turn, msg);
-                        continue;
-                    }
-                    if pending.len() >= MAX_CONCURRENT_SUBAGENTS {
-                        let msg = format!("(subagent limit: {} already running — wait for their briefs)", pending.len());
-                        note(ledger, &ctl, depth, turn, msg);
-                        continue;
-                    }
-                    ledger.push(Kind::Action, turn, format!("A {profile} {task}"), None);
-                    ctl.emit(Ev::Action(depth, format!("A {profile} {task}")));
-                    // Immediate acknowledgment, so the next turn's context
-                    // proves the spawn happened and nothing needs repeating.
-                    let ack = format!("({profile} started in background — its [{profile}] brief will arrive in a later turn)");
-                    note(ledger, &ctl, depth, turn, ack);
-                    let cfg2 = Arc::clone(&cfg);
-                    let root2 = root.clone();
-                    let p2 = profile.clone();
-                    let t2 = task.clone();
-                    let ctl2 = ctl.clone();
-                    pending.push((
-                        profile,
-                        task,
-                        std::thread::spawn(move || run(cfg2, root2, &t2, Some(&p2), depth + 1, ctl2)),
-                    ));
-                }
-                other => {
-                    let key = crate::ledger::fnv(&format!("{other:?}"));
-                    if repeats.get(&key).is_some_and(|(n, _)| *n >= 5) {
-                        refusals += 1;
-                        // Every note is UNIQUE text with a rotating concrete
-                        // suggestion: deterministic samplers (diffusion) can
-                        // only escape a loop if their input actually changes.
-                        let hint = match refusals % 4 {
-                            0 => "read the file again with R before editing",
-                            1 => "rewrite the ENTIRE function in one E covering its full line range",
-                            2 => "run the failing check with X and act on its exact message",
-                            _ => "explain your plan to the user with S, then try a different command",
-                        };
-                        let msg = format!("(refusal #{refusals}: that command keeps repeating with the same result — {hint})");
-                        note(ledger, &ctl, depth, turn, msg);
-                        continue;
-                    }
-                    let is_edit = matches!(other, Cmd::Edit { .. } | Cmd::Insert { .. } | Cmd::New { .. });
-                    exec_one(other, ws, ledger, &cfg, &client, task, turn, &ctx_cfg, &ctl, depth);
-                    if is_edit && ledger.entries.last().is_some_and(|e| !e.text.starts_with("err")) {
-                        edited = true;
-                    }
-                    let res_hash = ledger.entries.last().map(|e| e.hash).unwrap_or(0);
-                    let e = repeats.entry(key).or_insert((0, 0));
-                    if e.1 == res_hash {
-                        e.0 += 1;
-                    } else {
-                        *e = (1, res_hash);
-                    }
-                    if e.0 >= 3 {
-                        // Also unique per occurrence (see refusal note above).
-                        let msg = format!(
-                            "(warning {}x: that command gives the identical result every time — running it again will not help; change approach)",
-                            e.0
-                        );
-                        note(ledger, &ctl, depth, turn, msg);
-                    }
-                }
-            }
+        for cmd in tail.drain(..) {
+            tc.dispatch(cmd);
         }
+        rep.commands += tc.executed;
+        rep.tool_ms += tc.tool_us / 1000;
+        let TurnCtx { mut done, edited, .. } = tc;
         // Auto-verify: after any editing turn, run the configured check and
         // inject its result — the model's explicit "run the tests" turn (the
         // most common turn in every trajectory) becomes unnecessary. A failing
         // verify also refuses a same-turn D.
         if edited {
             if let Some(vcmd) = &cfg.verify.cmd {
+                let t_v = Instant::now();
                 let out = run_shell(vcmd, &root, cfg.verify.timeout_ms, &cfg.exec.shell);
+                rep.tool_ms += t_v.elapsed().as_millis();
                 let ok = out.starts_with("ok");
                 let pruned = prune(&cfg.verify.prune, &out);
                 note(
@@ -451,7 +383,6 @@ pub fn run_session(
                 }
             }
         }
-        rep.tool_ms += t_tools.elapsed().as_millis();
 
         // A model that ignores refusals and re-sends the same command forever
         // (deterministic samplers have no variance to escape with) must not
@@ -625,6 +556,148 @@ fn action_of(cmd: &Cmd) -> String {
         Cmd::View { target } => format!("V {target}"),
         Cmd::Say { text } => format!("S {}", crate::tools::clip(text, 60)),
         Cmd::Outline { target } => format!("O {target}"),
+    }
+}
+
+/// One turn's dispatch state. Commands run through here both from inside the
+/// stream callback (the moment the lexer completes them, mid-generation) and
+/// from the deferred tail after the stream ends — identical semantics, so the
+/// only difference is WHEN the work happens.
+struct TurnCtx<'a> {
+    cfg: &'a Arc<Config>,
+    root: &'a PathBuf,
+    ledger: &'a mut Ledger,
+    ws: &'a mut Workspace,
+    client: &'a Client,
+    ctl: &'a Ctl,
+    ctx_cfg: &'a crate::config::CtxCfg,
+    allowed: &'a Option<Vec<char>>,
+    task: &'a str,
+    depth: u8,
+    turn: u32,
+    images: &'a mut Vec<(String, String)>,
+    pending: &'a mut Vec<(String, String, std::thread::JoinHandle<Report>)>,
+    repeats: &'a mut std::collections::HashMap<u64, (u32, u64)>,
+    refusals: &'a mut u32,
+    done: Option<String>,
+    edited: bool,
+    executed: usize,
+    tool_us: u128,
+}
+
+impl TurnCtx<'_> {
+    fn note(&mut self, text: String) {
+        note(self.ledger, self.ctl, self.depth, self.turn, text);
+    }
+
+    fn dispatch(&mut self, cmd: Cmd) {
+        self.executed += 1;
+        if let Some(allow) = self.allowed {
+            let v = verb_of(&cmd);
+            if !allow.contains(&v) && v != 'D' {
+                self.ledger.push(Kind::Result, self.turn, format!("verb {v} not allowed in this profile"), None);
+                return;
+            }
+        }
+        match cmd {
+            Cmd::Done { msg } => self.done = Some(msg),
+            Cmd::Say { text } => {
+                if self.depth == 0 {
+                    self.ctl.emit(Ev::Say(text.clone()));
+                }
+                self.ledger.push(Kind::Result, self.turn, format!("(you told the user: {text})"), None);
+            }
+            Cmd::View { target } => {
+                let act = format!("V {target}");
+                self.ctl.emit(Ev::Action(self.depth, act.clone()));
+                self.ledger.push(Kind::Action, self.turn, act, None);
+                let result = match self.ws.load_image(&target) {
+                    Ok((id, mime, b64, bytes)) => {
+                        self.images.push((mime, b64));
+                        format!("(image #{id} attached — you will SEE it in the next turn; {}KB)", bytes / 1024)
+                    }
+                    Err(e) => format!("err: {e}"),
+                };
+                self.note(result);
+            }
+            Cmd::Agent { profile, task } => {
+                if self.depth >= 2 {
+                    self.ledger.push(Kind::Result, self.turn, "subagent depth limit reached".into(), None);
+                    return;
+                }
+                if !self.cfg.profile.contains_key(&profile) {
+                    self.ledger.push(Kind::Result, self.turn, format!("no profile '{profile}'"), None);
+                    return;
+                }
+                // The spawn-storm guard: an identical spawn while the first is
+                // still running is a model mistake, not a wish for two of them.
+                let norm = |s: &str| s.trim_matches('"').trim().to_ascii_lowercase();
+                if self.pending.iter().any(|(p, t, _)| *p == profile && norm(t) == norm(&task)) {
+                    let msg = format!("({profile} is ALREADY RUNNING on that task — its brief arrives in a later turn; do not spawn it again)");
+                    self.note(msg);
+                    return;
+                }
+                self.ledger.push(Kind::Action, self.turn, format!("A {profile} {task}"), None);
+                self.ctl.emit(Ev::Action(self.depth, format!("A {profile} {task}")));
+                // Immediate acknowledgment, so the next turn's context
+                // proves the spawn happened and nothing needs repeating.
+                let ack = format!("({profile} started in background — its [{profile}] brief will arrive in a later turn)");
+                self.note(ack);
+                let cfg2 = Arc::clone(self.cfg);
+                let root2 = self.root.clone();
+                let p2 = profile.clone();
+                let t2 = task.clone();
+                let ctl2 = self.ctl.clone();
+                let d = self.depth;
+                self.pending.push((
+                    profile,
+                    task,
+                    std::thread::spawn(move || run(cfg2, root2, &t2, Some(&p2), d + 1, ctl2)),
+                ));
+            }
+            other => {
+                let key = crate::ledger::fnv(&format!("{other:?}"));
+                if self.repeats.get(&key).is_some_and(|(n, _)| *n >= 5) {
+                    *self.refusals += 1;
+                    // Every note is UNIQUE text with a rotating concrete
+                    // suggestion: deterministic samplers (diffusion) can
+                    // only escape a loop if their input actually changes.
+                    let hint = match *self.refusals % 4 {
+                        0 => "read the file again with R before editing",
+                        1 => "rewrite the ENTIRE function in one E covering its full line range",
+                        2 => "run the failing check with X and act on its exact message",
+                        _ => "explain your plan to the user with S, then try a different command",
+                    };
+                    let msg = format!("(refusal #{}: that command keeps repeating with the same result — {hint})", *self.refusals);
+                    self.note(msg);
+                    return;
+                }
+                let is_edit = matches!(other, Cmd::Edit { .. } | Cmd::Insert { .. } | Cmd::New { .. });
+                let t = Instant::now();
+                exec_one(other, self.ws, self.ledger, self.cfg, self.client, self.task, self.turn, self.ctx_cfg, self.ctl, self.depth);
+                self.tool_us += t.elapsed().as_micros();
+                if is_edit && self.ledger.entries.last().is_some_and(|e| !e.text.starts_with("err")) {
+                    self.edited = true;
+                }
+                let res_hash = self.ledger.entries.last().map(|e| e.hash).unwrap_or(0);
+                let cnt = {
+                    let e = self.repeats.entry(key).or_insert((0, 0));
+                    if e.1 == res_hash {
+                        e.0 += 1;
+                    } else {
+                        *e = (1, res_hash);
+                    }
+                    e.0
+                };
+                if cnt >= 3 {
+                    // Also unique per occurrence (see refusal note above).
+                    let msg = format!(
+                        "(warning {cnt}x: that command gives the identical result every time — running it again will not help; change approach)"
+                    );
+                    self.note(msg);
+                }
+            }
+        }
     }
 }
 
