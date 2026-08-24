@@ -8,5 +8,6 @@ pub mod mods;
 pub mod outline;
 pub mod plan;
 pub mod render;
+pub mod shelld;
 pub mod tools;
 pub mod tui;

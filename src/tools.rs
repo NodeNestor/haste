@@ -453,6 +453,14 @@ pub fn run_shell_env(
     shell: &str,
     envs: &std::collections::BTreeMap<String, String>,
 ) -> String {
+    // The persistent daemon absorbs powershell.exe's 200-600ms startup. Tools
+    // with a per-tool [env] keep the one-shot path: a shared daemon must not
+    // leak one mod's environment into another mod's calls.
+    if shell == "powershell" && envs.is_empty() {
+        if let Some((text, code)) = crate::shelld::run(line, cwd, timeout_ms) {
+            return finish(text, code);
+        }
+    }
     let mut cmd = match shell {
         "powershell" => {
             let mut c = Command::new("powershell");
@@ -514,9 +522,13 @@ pub fn run_shell_env(
         }
         text.push_str(&err);
     }
-    // Collapse column-alignment padding (PowerShell tables etc.): runs of
-    // whitespace are token waste AND a repetition attractor that tips
-    // quantized models into degeneration when they sit at the context tail.
+    finish(text, code)
+}
+
+/// Shared result shaping for both spawn paths. Collapses column-alignment
+/// padding (PowerShell tables etc.): runs of whitespace are token waste AND
+/// a repetition attractor that tips quantized models into degeneration.
+fn finish(text: String, code: i32) -> String {
     let text = squeeze_spaces(text.trim_end());
     if code == 0 {
         if text.is_empty() { "ok".into() } else { format!("ok\n{text}") }
