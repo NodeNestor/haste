@@ -1,0 +1,9 @@
+# Adds a W verb: fetch a URL, strip markup, distill to task-relevant facts.
+# 40K tokens of web page in the ledger, ~300 tokens in the context.
+name = "webfetch"
+
+[tool.W]
+desc = "fetch a URL (distilled to task-relevant facts)"
+cmd = "curl -sL --max-time 20 {args}"
+prune = "drop:^\s*<|distill"
+timeout_ms = 30000

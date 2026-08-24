@@ -1,0 +1,7 @@
+# A prompt-only mod: no verbs, just standing instructions injected into the
+# system prompt of every session on this machine.
+name = "house-rules"
+prompt = """
+House rules: commit messages in imperative mood. Never touch files under
+vendor/. Prefer editing existing files over creating new ones.
+"""

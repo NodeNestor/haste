@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" font-family="ui-monospace,SFMono-Regular,Consolas,Menlo,monospace" font-size="14">
+  <style>
+    .bg{fill:#0f1216}.p{fill:#d8dee4}.d{fill:#697380}.c{fill:#56b6c2}.g{fill:#7ee787}.r{fill:#e06c75}
+    .sb{fill:#c9d1d9}.st{fill:#0f1216}
+  </style>
+  <rect class="bg" width="960" height="540" rx="8"/>
+  <!-- window dots -->
+  <circle cx="22" cy="20" r="6" fill="#ff5f57"/><circle cx="42" cy="20" r="6" fill="#febc2e"/><circle cx="62" cy="20" r="6" fill="#28c840"/>
+  <g transform="translate(18,52)">
+    <text y="0"   class="d">haste · q38 · ~/code/shoply</text>
+    <text y="22"  class="d">Enter task · /help for commands · Esc stop · /q quit</text>
+    <text y="66"  class="g" font-weight="bold">&gt; fix the failing checkout test</text>
+    <text y="88"  class="c">  · G "checkout" tests</text>
+    <text y="110" class="d">    #0:12:def test_checkout_total():</text>
+    <text y="132" class="c">  · R 0 40:80</text>
+    <text y="154" class="d">    #0 tests/test_checkout.py 40:80 of 122</text>
+    <text y="176" class="c">  · A researcher find how totals are rounded</text>
+    <text y="198" class="d">    (researcher started in background — its brief arrives in a later turn)</text>
+    <text y="220" class="c">  · X pytest tests/test_checkout.py -x</text>
+    <text y="242" class="r">    exit 1</text>
+    <text y="264" class="d">    E  assert total == 107.10  !=  107.0999999…</text>
+    <text y="286" class="c">  · E 1 18:18 (+1 lines)</text>
+    <text y="308" class="d">    ok #1 now 61 lines</text>
+    <text y="330" class="d">    (auto-verify PASS: `pytest -q`)</text>
+    <text y="352" class="p">Rounding bug found in tax.py — switched the total to Decimal, tests green.</text>
+    <text y="374" class="d">  6 turns · 11 cmds · 8.9s · in 41.2k (86% cached) · out 402t · 1 seal</text>
+  </g>
+  <!-- sidebar divider -->
+  <g transform="translate(660,52)" class="d">
+    <text y="0">│</text><text y="22">│</text><text y="44">│</text><text y="66">│</text><text y="88">│</text><text y="110">│</text><text y="132">│</text><text y="154">│</text><text y="176">│</text><text y="198">│</text><text y="220">│</text><text y="242">│</text><text y="264">│</text><text y="286">│</text><text y="308">│</text><text y="330">│</text><text y="352">│</text><text y="374">│</text>
+  </g>
+  <g transform="translate(682,52)">
+    <text y="0"   class="d">── agents ──</text>
+    <text y="22"  class="c">⠹ researcher</text>
+    <text y="44"  class="d">  G "rounding" src</text>
+    <text y="66"  class="d">✔ fixer</text>
+    <text y="88"  class="d">  done: patched tax.py</text>
+    <text y="132" class="d">── plan ──</text>
+    <text y="154" class="d">shoply checkout fix</text>
+    <text y="176" class="g">[x] repro — failing test</text>
+    <text y="198" class="c">[&gt;] fix — rounding in tax</text>
+    <text y="220" class="d">[ ] verify — pytest green</text>
+  </g>
+  <!-- status bar -->
+  <rect class="sb" x="0" y="488" width="960" height="24"/>
+  <text x="18" y="505" class="st"> ~/code/shoply · ⠼ turn 6 · 9s · X pytest tests/test_checkout.py -x · ctx 7.2k · stream on</text>
+  <text x="18" y="530" class="p">&gt; </text>
+</svg>

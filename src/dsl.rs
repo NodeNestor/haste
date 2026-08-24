@@ -46,6 +46,9 @@ pub struct Lexer {
     /// Non-empty lines that parsed as nothing and were silently dropped —
     /// usually the model narrating in prose that the user never sees.
     pub dropped: usize,
+    /// The dropped text itself (capped), so a commands-free turn can be
+    /// rescued as an S instead of aborting the run with the report unread.
+    pub dropped_text: String,
 }
 
 impl Default for Lexer {
@@ -56,7 +59,7 @@ impl Default for Lexer {
 
 impl Lexer {
     pub fn new() -> Lexer {
-        Lexer { buf: String::new(), pending: None, done_msg: None, dropped: 0 }
+        Lexer { buf: String::new(), pending: None, done_msg: None, dropped: 0, dropped_text: String::new() }
     }
 
     pub fn feed(&mut self, chunk: &str, out: &mut Vec<Cmd>) {
@@ -107,7 +110,7 @@ impl Lexer {
         let verb = it.next().unwrap_or("");
         let rest = it.next().unwrap_or("").trim();
         if verb.len() != 1 {
-            self.dropped += 1; // prose/noise line: ignored
+            self.drop_line(line);
             return;
         }
         let v = verb.chars().next().unwrap();
@@ -177,7 +180,15 @@ impl Lexer {
             c if c.is_ascii_uppercase() => {
                 out.push(Cmd::Custom { verb: c, args: rest.to_string() });
             }
-            _ => self.dropped += 1,
+            _ => self.drop_line(line),
+        }
+    }
+
+    fn drop_line(&mut self, line: &str) {
+        self.dropped += 1;
+        if self.dropped_text.len() < 4000 {
+            self.dropped_text.push_str(line);
+            self.dropped_text.push('\n');
         }
     }
 }

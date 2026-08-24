@@ -421,26 +421,37 @@ pub fn run_session(
             degens = 0;
         }
 
+        let mut prose_rescued = false;
         if tc.executed == 0 && tail.is_empty() {
-            empty_turns += 1;
-            if empty_turns >= MAX_EMPTY_TURNS {
-                rep.final_msg = "(aborted: model produced no commands)".into();
-                break;
+            let prose = lexer.dropped_text.trim();
+            if !prose.is_empty() {
+                // Prose rescue: a commands-free turn that is all prose IS the
+                // model talking — deliver it as an S instead of discarding it
+                // and aborting three turns later with the report unread.
+                prose_rescued = true;
+                tail.push(Cmd::Say { text: prose.to_string() });
+                tc.note("(that was prose, not commands — delivered to the user as S this once; wrap text in S yourself, or finish with D)".into());
+            } else {
+                empty_turns += 1;
+                if empty_turns >= MAX_EMPTY_TURNS {
+                    rep.final_msg = "(aborted: model produced no commands)".into();
+                    break;
+                }
+                tc.ledger.push(
+                    Kind::Result,
+                    turn,
+                    "no commands parsed — plain prose is discarded. Use S <text> to talk to the user, or D to finish".into(),
+                    None,
+                );
+                continue;
             }
-            tc.ledger.push(
-                Kind::Result,
-                turn,
-                "no commands parsed — plain prose is discarded. Use S <text> to talk to the user, or D to finish".into(),
-                None,
-            );
-            continue;
         }
         empty_turns = 0;
 
         // Prose mixed into a command turn vanishes silently — the classic
         // symptom is "here are the results:" followed by a list the user
         // never sees. Tell the model exactly what it lost.
-        if lexer.dropped > 0 {
+        if lexer.dropped > 0 && !prose_rescued {
             tc.note(format!(
                 "({} plain-prose line{} DISCARDED — anything meant for the user must be inside one S line or the D message)",
                 lexer.dropped,
@@ -459,7 +470,7 @@ pub fn run_session(
             && tc.pending.is_empty()
             && !tail.is_empty()
             && tail.iter().all(|c| matches!(c, Cmd::Say { .. }))
-            && lexer.dropped < 3
+            && (lexer.dropped < 3 || prose_rescued)
         {
             // "Found 11 dirs. Now scanning each..." is announcing the NEXT
             // step, not waiting on the user — a trailing ellipsis must not

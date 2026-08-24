@@ -865,3 +865,18 @@ fn override_tool_replaces_native_verb() {
     let _ = parsed; // parse is fine; Config::load's validation rejects it
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn pure_prose_turn_is_rescued_as_say() {
+    // The model writes its whole report in prose with no verbs — that must
+    // reach the user and end the run, not abort as "no commands".
+    let port = mock_server(vec![
+        "The rounding bug is fixed in tax.py.\nAll three tests pass now.\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "report", None, 0, haste::agent::Ctl::default());
+    assert!(rep.final_msg.contains("rounding bug is fixed"), "{}", rep.final_msg);
+    assert!(rep.final_msg.contains("tests pass"), "{}", rep.final_msg);
+    assert_eq!(rep.turns, 1, "prose rescue must not loop");
+    let _ = std::fs::remove_dir_all(root);
+}

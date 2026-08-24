@@ -1,0 +1,11 @@
+# OVERRIDES the native G verb (game-mod style): every `G <pattern> [target]`
+# the model emits routes here instead of the built-in searcher.
+# Overridable verbs: R G X O V — payload (E/I/N) and protocol (S/D/A) verbs
+# stay native. Remove `override = true` and this mod is refused at load.
+name = "fastgrep"
+
+[tool.G]
+desc = "search files (ripgrep, context lines included)"
+cmd = "rg -n --no-heading -C 1 --max-columns 200 -e {args}"
+prune = "head_tail:40,10"
+override = true
