@@ -15,7 +15,7 @@ where the model stops being the bottleneck and wall-clock is
   (tool time hides inside generation time), a persistent shell daemon (~2ms per command
   vs ~150ms of shell startup), background test runs. Overhead is a CI assertion.
 
-~4.7k LOC, 7 deps, one self-contained binary.
+~4.9k LOC, 7 deps, one self-contained binary.
 
 ![a real haste session: live subagent, plan pane, verify gates](docs/session.png)
 
@@ -105,3 +105,9 @@ on every `v*` tag.
 Ledger/renderer split and the sealed-prefix rule from nestor; weak/fast-model
 discipline from stim; pruning instincts from nestor-lean — redesigned to fit in one
 context window, so the agent can read its own harness in a single `R`.
+
+## License
+
+Fair-code, under the [Sustainable Use License](LICENSE): free to use, modify,
+and share for internal and personal purposes. Selling haste or offering it as
+a hosted service requires a commercial license from NodeNestor.

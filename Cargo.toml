@@ -1,9 +1,10 @@
 [package]
 name = "haste"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Micro agent harness built for wafer-speed inference: minimum turns, minimum tokens, ~zero harness time."
-license = "MIT"
+license-file = "LICENSE"
+repository = "https://github.com/NodeNestor/haste"
 
 [dependencies]
 ureq = { version = "2", features = ["json"] }
