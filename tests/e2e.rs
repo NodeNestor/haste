@@ -742,3 +742,21 @@ fn renderer_bench_1000_entries() {
     assert!(doc.len() / 4 < cfg.budget_tokens + 2000, "doc {} chars", doc.len());
 }
 
+
+#[test]
+fn narration_d_is_refused_and_scaffold_is_stripped() {
+    // Turn 1: the model narrates with S and then reaches for D with the same
+    // text — that must NOT end the run. Turn 2: a real D, with hallucinated
+    // tool-XML after the answer, which must be stripped from the final.
+    let port = mock_server(vec![
+        "S checking sibling projects for patterns\nD checking sibling projects for patterns\n",
+        "D swedish only, no i18n layer\n</invoke>\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "answer", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "swedish only, no i18n layer");
+    assert_eq!(rep.turns, 2, "narration D must not end turn 1");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("narrates work in progress"), "no refusal note");
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -273,6 +273,7 @@ pub fn run_session(
             edited: false,
             executed: 0,
             tool_us: 0,
+            says: Vec::new(),
         };
         let stream_res = client.stream(&system, &user, &turn_images, &mut |delta| {
             if tc.depth == 0 {
@@ -403,7 +404,7 @@ pub fn run_session(
         }
         rep.commands += tc.executed;
         rep.tool_ms += tc.tool_us / 1000;
-        let TurnCtx { done, edited, .. } = tc;
+        let TurnCtx { done, edited, says, .. } = tc;
         // Auto-verify: after any editing turn, the configured check runs in a
         // BACKGROUND thread — the model keeps working while tests run; the
         // result is harvested at a later turn top. A D joins the run first
@@ -441,6 +442,26 @@ pub fn run_session(
         }
 
         if let Some(msg) = done {
+            // A D that merely repeats this turn's S is narration, not a final
+            // report — the model is mid-work and reached for the wrong verb
+            // ("S checking X…" + "D checking X…" ended real runs early).
+            if !say_final {
+                let d = clean_final(&msg).to_ascii_lowercase();
+                let echoes = |s: &String| {
+                    let s = s.trim().to_ascii_lowercase();
+                    s == d || s.starts_with(&d) || d.starts_with(&s)
+                };
+                if !d.is_empty() && says.iter().any(echoes) {
+                    note(
+                        ledger,
+                        &ctl,
+                        depth,
+                        turn,
+                        "(D refused — that message narrates work in progress, and you already told the user with S. Keep working; D only with the RESULTS)".into(),
+                    );
+                    continue;
+                }
+            }
             // A pending background verify gets the first word on finishing:
             // join it now, so a failing check still refuses the same D that
             // rode in with the edits. Solo-S mic-backs are conversation.
@@ -571,7 +592,20 @@ fn clean_final(msg: &str) -> String {
     let mut out = Vec::new();
     for l in msg.lines() {
         let t = l.trim_start();
-        if t.starts_with("## TASK") || t.starts_with("## LOG") || t.starts_with("## NOW") || t.starts_with("files: #") {
+        // Prompt scaffolding AND hallucinated tool-call XML (</invoke>,
+        // <function_...>, <|im_end|>): models bleed their tool-training
+        // syntax after a real answer — cut at the first scaffold line.
+        if t.starts_with("## TASK")
+            || t.starts_with("## LOG")
+            || t.starts_with("## NOW")
+            || t.starts_with("files: #")
+            || t.starts_with("<|")
+            || t.starts_with("<invoke")
+            || t.starts_with("</invoke")
+            || t.starts_with("<function_")
+            || t.starts_with("</function")
+            || t.trim_end() == "[TOOL_CALLS]"
+        {
             break;
         }
         out.push(l);
@@ -643,6 +677,8 @@ struct TurnCtx<'a> {
     edited: bool,
     executed: usize,
     tool_us: u128,
+    /// S texts from this turn, for catching a D that merely repeats one.
+    says: Vec<String>,
 }
 
 impl TurnCtx<'_> {
@@ -666,6 +702,7 @@ impl TurnCtx<'_> {
                     self.ctl.emit(Ev::Say(text.clone()));
                 }
                 self.ledger.push(Kind::Result, self.turn, format!("(you told the user: {text})"), None);
+                self.says.push(text);
             }
             Cmd::View { target } => {
                 let act = format!("V {target}");
@@ -970,7 +1007,7 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
         }
     }
     s.push_str("S <text>            say one line to the user WITHOUT finishing (progress, questions, findings)\n");
-    s.push_str("D <message>         done; message is your final report (may span lines to end of message)\n");
+    s.push_str("D <message>         done — ENDS THE RUN; message is your final report (may span lines to end of message). Progress updates are S, never D\n");
     let plan_file = &cfg.plan.file;
     s.push_str(
         "Rules: files get ids (#0,#1..) listed in the files: header — refer to them by id (with or without #). \
