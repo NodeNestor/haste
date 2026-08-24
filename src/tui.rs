@@ -57,7 +57,15 @@ struct App {
 
 impl App {
     fn push(&mut self, kind: u8, line: String) {
-        self.log.push((kind, crate::tools::clip(&line, 600)));
+        // Split embedded newlines: a raw \n inside Print() breaks the cursor
+        // mid-row and smears neighbouring lines together on screen.
+        let clipped = crate::tools::clip(&line, 600);
+        if clipped.is_empty() {
+            self.log.push((kind, String::new()));
+        }
+        for l in clipped.lines() {
+            self.log.push((kind, l.to_string()));
+        }
         if self.log.len() > LOG_CAP {
             self.log.drain(..self.log.len() - LOG_CAP);
         }
@@ -65,17 +73,17 @@ impl App {
     }
 }
 
-pub fn run(cfg: Arc<Config>, root: PathBuf) -> io::Result<()> {
+pub fn run(cfg: Arc<Config>, root: PathBuf, initial_task: Option<String>) -> io::Result<()> {
     let mut out = io::BufWriter::new(io::stdout());
     terminal::enable_raw_mode()?;
     execute!(out, terminal::EnterAlternateScreen, cursor::Hide)?;
-    let res = main_loop(&cfg, root, &mut out);
+    let res = main_loop(&cfg, root, initial_task, &mut out);
     execute!(out, cursor::Show, terminal::LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
     res
 }
 
-fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Result<()> {
+fn main_loop(cfg: &Arc<Config>, root: PathBuf, initial_task: Option<String>, out: &mut impl Write) -> io::Result<()> {
     let mut app = App {
         log: {
             let mut l = vec![
@@ -113,6 +121,11 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
     let mut last_tick = Instant::now();
     // One background release check per TUI session; at most one line arrives.
     let mut update_rx = Some(crate::update::spawn_check());
+    // `haste --tui "<task>"`: start working immediately, TUI attached.
+    if let Some(t) = initial_task {
+        app.input = t;
+        submit(&mut app, cfg);
+    }
 
     while !app.quit {
         if let Some(rx) = &update_rx {
@@ -133,11 +146,17 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
             dirty = true;
         }
         if event::poll(Duration::from_millis(40))? {
-            if let Event::Key(k) = event::read()? {
-                if k.kind != event::KeyEventKind::Release {
-                    handle_key(&mut app, cfg, k);
-                    dirty = true;
+            match event::read()? {
+                Event::Key(k) => {
+                    if k.kind != event::KeyEventKind::Release {
+                        handle_key(&mut app, cfg, k);
+                        dirty = true;
+                    }
                 }
+                // A resize mangles the alt screen; without a repaint the TUI
+                // looks frozen solid (idle never redraws on its own).
+                Event::Resize(_, _) => dirty = true,
+                _ => {}
             }
         }
         if app.running && last_tick.elapsed() > Duration::from_millis(250) {
@@ -223,6 +242,10 @@ fn finish_run(app: &mut App, msg: String) {
     for l in msg.lines() {
         app.push(PLAIN, l.to_string());
     }
+    // Unmissable end-of-run marker: a run that stops mid-thought otherwise
+    // reads as a freeze — the user waits on a promise while the status bar
+    // quietly says idle.
+    app.push(DIM, "── run finished — enter the next task ──".into());
     app.push(PLAIN, String::new());
     app.running = false;
     app.live.clear();
@@ -469,7 +492,7 @@ fn side_line(out: &mut impl Write, x: u16, r: u16, kind: u8, text: &str, sw: usi
 fn draw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     let (tw, th) = terminal::size()?;
     let (w, h) = (tw as usize, th as usize);
-    if h < 6 || w < 20 {
+    if h < 8 || w < 20 {
         return Ok(());
     }
     if app.running {
@@ -485,7 +508,7 @@ fn draw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     let cw = w - side; // chat width (sidebar text starts after a divider)
     // Row-wise clearing, never Clear(All): a full-screen clear 4x/second is
     // visible flicker on classic conhost (and hard on slow terminals).
-    for r in 0..(h.saturating_sub(2)) as u16 {
+    for r in 0..h as u16 {
         queue!(out, cursor::MoveTo(0, r), terminal::Clear(terminal::ClearType::UntilNewLine))?;
     }
 
@@ -497,9 +520,10 @@ fn draw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         .lines()
         .map(|l| 1 + l.len() / w.saturating_sub(1).max(1))
         .sum();
-    // Bottom rows: input, status bar, and two blank padding rows so the chat
-    // floats a little above the bar instead of sitting on it.
-    let usable = h - 4;
+    // Bottom rows: status bar, then a bordered input box (line over and
+    // under), then one blank row so conhost's horizontal scrollbar never
+    // covers the input; one padding row above keeps the chat off the bar.
+    let usable = h - 6;
     let stream_h = if app.stream_on && app.running && live_lines > 0 {
         (live_lines + 1).min(usable / 2)
     } else {
@@ -579,9 +603,13 @@ fn draw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         if app.stream_on { "on" } else { "off" }
     );
     let bar: String = status.chars().take(w).collect();
-    queue!(out, cursor::MoveTo(0, (h - 2) as u16), SetAttribute(Attribute::Reverse), Print(format!("{bar:<w$}")), SetAttribute(Attribute::Reset))?;
+    queue!(out, cursor::MoveTo(0, (h - 5) as u16), SetAttribute(Attribute::Reverse), Print(format!("{bar:<w$}")), SetAttribute(Attribute::Reset))?;
 
-    // Input line.
+    // Input box: a line over and under, last row left empty so conhost's
+    // horizontal scrollbar never sits on the prompt.
+    let border = "─".repeat(w.saturating_sub(1));
+    queue!(out, cursor::MoveTo(0, (h - 4) as u16))?;
+    styled_print(out, DIM, &border)?;
     let prompt = format!("> {}", app.input);
     let nch = prompt.chars().count();
     let shown: String = if nch >= w {
@@ -589,6 +617,8 @@ fn draw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     } else {
         prompt
     };
-    queue!(out, cursor::MoveTo(0, (h - 1) as u16), terminal::Clear(terminal::ClearType::UntilNewLine), Print(&shown))?;
+    queue!(out, cursor::MoveTo(0, (h - 3) as u16), Print(&shown))?;
+    queue!(out, cursor::MoveTo(0, (h - 2) as u16))?;
+    styled_print(out, DIM, &border)?;
     out.flush()
 }

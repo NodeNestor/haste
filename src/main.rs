@@ -88,7 +88,8 @@ fn main() {
 
     // No task = interactive. Explicit --tui always wins.
     if want_tui || task.trim().is_empty() {
-        if let Err(e) = haste::tui::run(cfg, root) {
+        let initial = (!task.trim().is_empty()).then(|| task.clone());
+        if let Err(e) = haste::tui::run(cfg, root, initial) {
             eprintln!("haste tui: {e}");
             std::process::exit(1);
         }

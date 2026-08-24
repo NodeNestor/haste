@@ -923,3 +923,20 @@ fn step_kickoff_protocol_fires_on_doing_transition() {
     assert!(ledger.contains("step 's1' started — protocol"), "no kickoff note");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn talk_only_turn_with_open_plan_does_not_end_the_run() {
+    let port = mock_server(vec![
+        "N plan.json\n{\"goal\":\"keep going\",\"steps\":[{\"id\":\"s1\",\"what\":\"the fix\",\"status\":\"doing\"}]}\n.\n",
+        // Solo-S narration mid-plan — must be nudged back to work, not mic-backed.
+        "S still working through the rounding logic\n",
+        "N plan.json\n{\"goal\":\"keep going\",\"steps\":[{\"id\":\"s1\",\"what\":\"the fix\",\"status\":\"done\"}]}\n.\nD finished\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "go", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "finished");
+    assert_eq!(rep.turns, 3, "solo-S with open plan must not end turn 2");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("mid-task"), "no continue nudge");
+    let _ = std::fs::remove_dir_all(root);
+}

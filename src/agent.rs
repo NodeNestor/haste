@@ -473,16 +473,19 @@ pub fn run_session(
             && (lexer.dropped < 3 || prose_rescued)
         {
             // "Found 11 dirs. Now scanning each..." is announcing the NEXT
-            // step, not waiting on the user — a trailing ellipsis must not
-            // hand the mic back and end the run mid-task.
-            let trailing = tail
-                .iter()
-                .rev()
-                .find_map(|c| match c {
-                    Cmd::Say { text } => Some(text.trim_end()),
-                    _ => None,
-                })
-                .is_some_and(|t| t.ends_with("...") || t.ends_with('…'));
+            // step, not waiting on the user — continuation-speak must not
+            // hand the mic back and end the run mid-task. Neither may ANY
+            // talk-only turn while plan steps are still open, unless it is
+            // an actual question for the user.
+            let last_say = tail.iter().rev().find_map(|c| match c {
+                Cmd::Say { text } => Some(text.as_str()),
+                _ => None,
+            });
+            let plan_open =
+                cfg.plan.enforce && plan_seen.values().any(|s| s == "todo" || s == "doing");
+            let trailing = last_say.is_some_and(|t| {
+                sounds_unfinished(t) || (plan_open && !t.trim_end().ends_with('?'))
+            });
             if trailing && ellipsis_refusals < 3 {
                 ellipsis_refusals += 1;
                 nudge_continue = true;
@@ -557,7 +560,7 @@ pub fn run_session(
                     let s = s.trim().to_ascii_lowercase();
                     s == d || s.starts_with(&d) || d.starts_with(&s)
                 };
-                let trailing = (d.trim_end().ends_with("...") || d.trim_end().ends_with('…')) && ellipsis_refusals < 3;
+                let trailing = sounds_unfinished(&d) && ellipsis_refusals < 3;
                 if trailing {
                     ellipsis_refusals += 1;
                 }
@@ -664,6 +667,20 @@ pub fn run_session(
         ctl.emit(Ev::Done(rep.final_msg.clone()));
     }
     rep
+}
+
+/// "Now scanning..." / "Let me fix that." — text that promises MORE work.
+/// Ending a run on it looks like a freeze to the user: the last line on
+/// screen is a promise, the status quietly says idle, and they wait forever.
+fn sounds_unfinished(t: &str) -> bool {
+    let t = t.trim_end();
+    if t.ends_with("...") || t.ends_with('…') {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    ["let me ", "i'll ", "i will ", "going to ", "next i ", "now i ", "fixing that"]
+        .iter()
+        .any(|p| lower.contains(p))
 }
 
 fn fmt_k(n: u64) -> String {
