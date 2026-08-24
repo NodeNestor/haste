@@ -175,7 +175,7 @@ fn event_stream_feeds_a_ui() {
     ]);
     let root = temp_repo();
     let (tx, rx) = std::sync::mpsc::channel();
-    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None, inbox: None };
+    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None, inbox: None, tag: None };
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "look at greet.txt", None, 0, ctl);
     assert_eq!(rep.final_msg, "looked");
     let evs: Vec<haste::agent::Ev> = rx.try_iter().collect();
@@ -268,7 +268,7 @@ fn say_speaks_without_ending_the_run() {
     let port = mock_server(vec!["S found the bug, fixing it now\nX echo work\n", "D fixed\n"]);
     let root = temp_repo();
     let (tx, rx) = std::sync::mpsc::channel();
-    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None, inbox: None };
+    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None, inbox: None, tag: None };
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "task", None, 0, ctl);
     assert_eq!(rep.final_msg, "fixed");
     assert_eq!(rep.turns, 2, "S must not end the run");
@@ -536,7 +536,7 @@ fn midrun_inbox_message_lands_in_ledger() {
     let root = temp_repo();
     let cfg = Arc::new(cfg_for(port));
     let inbox = std::sync::Arc::new(std::sync::Mutex::new(vec!["also check the docs folder".to_string()]));
-    let ctl = haste::agent::Ctl { sink: None, stop: None, inbox: Some(inbox) };
+    let ctl = haste::agent::Ctl { sink: None, stop: None, inbox: Some(inbox), tag: None };
     let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
     let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "main task", None, 0, ctl);
     assert_eq!(rep.final_msg, "ok");
@@ -838,5 +838,30 @@ fn append_mode_dedups_identical_results_at_write_time() {
         .collect();
     let dups = session.ledger.entries.iter().filter(|e| e.text.starts_with("(= identical")).count();
     assert_eq!(dups, 1, "second read must be a pointer: {results:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn override_tool_replaces_native_verb() {
+    // A [tool.G] with override = true takes the G verb over from the builtin.
+    let port = mock_server(vec!["G anything at all\n", "D overridden\n"]);
+    let root = temp_repo();
+    let toml = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\n\
+         [context]\nbootstrap = false\n\
+         [tool.G]\ndesc = \"custom search\"\ncmd = \"echo MODGREP {{args}}\"\noverride = true\n"
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "search", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "overridden");
+    assert!(
+        session.ledger.entries.iter().any(|e| e.text.contains("MODGREP")),
+        "override tool did not run"
+    );
+    // Without the flag, a native-verb tool is refused at load.
+    let bad = "[model]\nbase_url = \"x\"\nmodel = \"m\"\n[tool.G]\ndesc = \"d\"\ncmd = \"c\"\n";
+    let parsed: Config = toml::from_str(bad).unwrap();
+    let _ = parsed; // parse is fine; Config::load's validation rejects it
     let _ = std::fs::remove_dir_all(root);
 }

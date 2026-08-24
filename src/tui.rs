@@ -7,7 +7,7 @@
 use crate::agent::{self, Ctl, Ev, Session};
 use crate::config::Config;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::style::{Attribute, Print, SetAttribute};
+use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::{cursor, execute, queue, terminal};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -20,8 +20,12 @@ const LOG_CAP: usize = 4000;
 
 /// Line styles in the session log.
 const PLAIN: u8 = 0; // agent's answer
-const DIM: u8 = 1; // actions, results, stats, system notes
+const DIM: u8 = 1; // results, stats, system notes
 const USER: u8 = 2; // the user's prompt
+const ACT: u8 = 3; // tool actions
+const ERR: u8 = 4; // errors, aborts, refusals
+
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 struct App {
     log: Vec<(u8, String)>,
@@ -35,6 +39,11 @@ struct App {
     /// Real billed context size (prompt_tokens) of the latest request.
     ctx_tokens: u64,
     last_action: String,
+    /// Sidebar: (name, latest activity line, finished) per live subagent.
+    agents: Vec<(String, String, bool)>,
+    /// Sidebar: current compact plan view.
+    plan: String,
+    spin: usize,
     started: Option<Instant>,
     rx: Option<Receiver<Ev>>,
     sess_rx: Option<Receiver<Session>>,
@@ -86,6 +95,9 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
         turn: 0,
         ctx_tokens: 0,
         last_action: String::new(),
+        agents: Vec::new(),
+        plan: String::new(),
+        spin: 0,
         started: None,
         rx: None,
         sess_rx: None,
@@ -122,7 +134,7 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
             dirty = true;
         }
         if dirty {
-            draw(&app, out)?;
+            draw(&mut app, out)?;
             dirty = false;
             last_tick = Instant::now();
         }
@@ -154,18 +166,37 @@ fn drain_events(app: &mut App) -> bool {
                 app.live.clear();
             }
             Ev::Delta(d) => app.live.push_str(&d),
-            Ev::Action(depth, a) => {
-                app.last_action = if depth == 0 { a.clone() } else { format!("[sub] {a}") };
-                let pad = "  ".repeat(depth as usize);
-                app.push(DIM, format!("  {pad}· {a}"));
+            Ev::Action(_, a) => {
+                app.last_action = a.clone();
+                app.push(ACT, format!("  · {a}"));
             }
-            Ev::Result(depth, r) => {
-                let pad = "  ".repeat(depth as usize);
-                app.push(DIM, format!("  {pad}  {r}"));
+            Ev::Result(_, r) => {
+                let k = if r.starts_with("err") || r.starts_with("exit ") || r.starts_with("model error") || r.starts_with("(aborted") {
+                    ERR
+                } else {
+                    DIM
+                };
+                app.push(k, format!("    {r}"));
             }
             Ev::Say(text) => app.push(PLAIN, text),
             Ev::Report(r) => app.push(DIM, format!("  {r}")),
             Ev::Ctx(t) => app.ctx_tokens = t,
+            Ev::Sub(name, line) => {
+                let line = crate::tools::clip(line.lines().next().unwrap_or(""), 80);
+                match app.agents.iter_mut().find(|(n, _, _)| *n == name) {
+                    Some(row) => {
+                        row.1 = line;
+                        row.2 = false;
+                    }
+                    None => app.agents.push((name, line, false)),
+                }
+            }
+            Ev::SubDone(name) => {
+                if let Some(row) = app.agents.iter_mut().find(|(n, _, _)| *n == name) {
+                    row.2 = true;
+                }
+            }
+            Ev::Plan(p) => app.plan = p,
             Ev::Done(msg) => {
                 finish_run(app, msg);
                 return true;
@@ -263,10 +294,11 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
         return;
     }
     app.push(USER, format!("> {line}"));
+    app.agents.clear();
     let (tx, rx) = std::sync::mpsc::channel();
     let (sess_tx, sess_rx) = std::sync::mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
-    let inbox = Arc::new(Mutex::new(Vec::new()));
+    let inbox = Arc::new(Mutex::new(Vec::<String>::new()));
     app.rx = Some(rx);
     app.sess_rx = Some(sess_rx);
     app.stop = Some(stop.clone());
@@ -286,7 +318,7 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
             &line,
             None,
             0,
-            Ctl { sink: Some(tx), stop: Some(stop), inbox: Some(inbox) },
+            Ctl { sink: Some(tx), stop: Some(stop), inbox: Some(inbox), tag: None },
         );
         let _ = sess_tx.send(session);
     });
@@ -313,17 +345,81 @@ fn wrap_into(dst: &mut Vec<(u8, String)>, kind: u8, line: &str, w: usize) {
 fn styled_print(out: &mut impl Write, kind: u8, text: &str) -> io::Result<()> {
     match kind {
         DIM => queue!(out, SetAttribute(Attribute::Dim), Print(text), SetAttribute(Attribute::Reset)),
-        USER => queue!(out, SetAttribute(Attribute::Bold), Print(text), SetAttribute(Attribute::Reset)),
+        USER => queue!(out, SetForegroundColor(Color::Green), SetAttribute(Attribute::Bold), Print(text), SetAttribute(Attribute::Reset), ResetColor),
+        ACT => queue!(out, SetForegroundColor(Color::DarkCyan), Print(text), ResetColor),
+        ERR => queue!(out, SetForegroundColor(Color::Red), Print(text), ResetColor),
         _ => queue!(out, Print(text)),
     }
 }
 
-fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
+/// Right sidebar: live agents on top, the plan below. Only drawn while it has
+/// content; the chat gets the full width back otherwise.
+fn draw_sidebar(app: &App, out: &mut impl Write, x: u16, rows: usize, sw: usize) -> io::Result<()> {
+    let mut row: u16 = 0;
+    if !app.agents.is_empty() {
+        side_line(out, x, row, DIM, "── agents ──", sw)?;
+        row += 1;
+        for (name, last, done) in &app.agents {
+            if row as usize + 2 > rows {
+                break;
+            }
+            let head = if *done {
+                format!("✔ {name}")
+            } else {
+                format!("{} {name}", SPINNER[app.spin % SPINNER.len()])
+            };
+            side_line(out, x, row, if *done { DIM } else { ACT }, &head, sw)?;
+            row += 1;
+            side_line(out, x, row, DIM, &format!("  {last}"), sw)?;
+            row += 1;
+        }
+        row += 1;
+    }
+    if !app.plan.is_empty() && (row as usize) < rows {
+        side_line(out, x, row, DIM, "── plan ──", sw)?;
+        row += 1;
+        for l in app.plan.lines() {
+            if row as usize >= rows {
+                break;
+            }
+            let l = l.strip_prefix("## PLAN: ").unwrap_or(l);
+            let kind = if l.starts_with("[x]") {
+                USER // green: done
+            } else if l.starts_with("[>]") {
+                ACT // cyan: in progress
+            } else {
+                DIM
+            };
+            side_line(out, x, row, kind, l, sw)?;
+            row += 1;
+        }
+    }
+    Ok(())
+}
+
+fn side_line(out: &mut impl Write, x: u16, r: u16, kind: u8, text: &str, sw: usize) -> io::Result<()> {
+    let clipped: String = text.chars().take(sw).collect();
+    queue!(out, cursor::MoveTo(x, r))?;
+    styled_print(out, kind, &clipped)
+}
+
+fn draw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     let (tw, th) = terminal::size()?;
     let (w, h) = (tw as usize, th as usize);
     if h < 6 || w < 20 {
         return Ok(());
     }
+    if app.running {
+        app.spin = app.spin.wrapping_add(1);
+    }
+    // Sidebar (agents + plan) claims the right edge only when it has content
+    // and the terminal is wide enough for both panes to breathe.
+    let side = if w >= 90 && (!app.agents.is_empty() || !app.plan.is_empty()) {
+        34.min(w / 3)
+    } else {
+        0
+    };
+    let cw = w - side; // chat width (sidebar text starts after a divider)
     queue!(out, terminal::Clear(terminal::ClearType::All), cursor::MoveTo(0, 0))?;
 
     // The stream pane only takes rows while something is streaming, and only
@@ -344,11 +440,11 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
     };
     let log_h = usable - stream_h;
 
-    // Session log (top), bottom-anchored.
+    // Session log (top), bottom-anchored, wrapped to the chat pane width.
     let mut wrapped: Vec<(u8, String)> = Vec::new();
     for (kind, l) in app.log.iter().rev().take(log_h + app.scroll + 40) {
         let mut tmp = Vec::new();
-        wrap_into(&mut tmp, *kind, l, w.saturating_sub(1));
+        wrap_into(&mut tmp, *kind, l, cw.saturating_sub(2));
         for t in tmp.into_iter().rev() {
             wrapped.push(t);
         }
@@ -361,6 +457,15 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
         let start = log_h.saturating_sub(visible.len());
         queue!(out, cursor::MoveTo(0, (start + row) as u16))?;
         styled_print(out, *kind, line)?;
+    }
+
+    // Sidebar: divider column + agents/plan panes over the log region.
+    if side > 0 {
+        for r in 0..log_h {
+            queue!(out, cursor::MoveTo(cw as u16 - 1, r as u16))?;
+            styled_print(out, DIM, "│")?;
+        }
+        draw_sidebar(app, out, cw as u16 + 1, log_h, side.saturating_sub(2))?;
     }
 
     // Live stream pane.
@@ -390,7 +495,7 @@ fn draw(app: &App, out: &mut impl Write) -> io::Result<()> {
         } else {
             format!(" · {}", app.last_action)
         };
-        format!("turn {} · {:.0}s{act}", app.turn, secs)
+        format!("{} turn {} · {:.0}s{act}", SPINNER[app.spin % SPINNER.len()], app.turn, secs)
     } else {
         "idle".into()
     };

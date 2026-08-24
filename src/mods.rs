@@ -65,11 +65,14 @@ pub fn apply(cfg: &mut Config) -> Vec<String> {
         let mod_path = md.to_string_lossy().replace('\\', "/");
         let mut verbs = Vec::new();
         for (verb, mut tool) in m.tool {
-            let ok = verb.len() == 1
-                && verb.chars().next().unwrap().is_ascii_uppercase()
-                && !NATIVE_VERBS.contains(&verb);
-            if !ok {
-                notes.push(format!("mod {label}: tool '{verb}' invalid (single uppercase letter outside {NATIVE_VERBS})"));
+            let c = verb.chars().next().unwrap_or(' ');
+            let native_ok = !NATIVE_VERBS.contains(c)
+                || (tool.override_native && crate::config::OVERRIDABLE_VERBS.contains(c));
+            if verb.len() != 1 || !c.is_ascii_uppercase() || !native_ok {
+                notes.push(format!(
+                    "mod {label}: tool '{verb}' invalid (single uppercase letter outside {NATIVE_VERBS}, or {} with override = true)",
+                    crate::config::OVERRIDABLE_VERBS
+                ));
                 continue;
             }
             if cfg.tool.contains_key(&verb) {

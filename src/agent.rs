@@ -25,6 +25,12 @@ pub enum Ev {
     Done(String),
     /// Real billed context size (prompt_tokens) of the latest request.
     Ctx(u64),
+    /// A named subagent's latest activity line (for a UI's agents pane).
+    Sub(String, String),
+    /// The named subagent finished.
+    SubDone(String),
+    /// Current compact plan view (for a UI's plan pane).
+    Plan(String),
 }
 
 #[derive(Clone, Default)]
@@ -34,13 +40,22 @@ pub struct Ctl {
     /// Messages the user sends mid-run; drained into the ledger at the top of
     /// each top-level turn, so you can steer the leader while it works.
     pub inbox: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Set on a subagent's Ctl: its activity is re-labeled Ev::Sub(name, …)
+    /// so a UI can route it to an agents pane instead of the main chat.
+    pub tag: Option<String>,
 }
 
 impl Ctl {
     fn emit(&self, ev: Ev) {
-        if let Some(s) = &self.sink {
-            let _ = s.send(ev);
-        }
+        let Some(s) = &self.sink else { return };
+        let ev = match (&self.tag, ev) {
+            (Some(t), Ev::Action(d, a)) if d > 0 => Ev::Sub(t.clone(), a),
+            (Some(t), Ev::Result(d, r)) if d > 0 => Ev::Sub(t.clone(), r),
+            // A subagent's turn counter must not fight the leader's.
+            (Some(_), Ev::Turn(_)) => return,
+            (_, ev) => ev,
+        };
+        let _ = s.send(ev);
     }
     fn stopped(&self) -> bool {
         self.stop
@@ -225,6 +240,9 @@ pub fn run_session(
             (String::new(), Vec::new())
         };
         let phase_done = plan_seen.values().filter(|s| s.as_str() == "done").count() > dones_before;
+        if depth == 0 {
+            ctl.emit(Ev::Plan(plan_view.clone()));
+        }
 
         // Model compaction: ask the model to summarize its own history. The
         // prompt is the SAME document the provider's KV cache already holds
@@ -651,6 +669,7 @@ fn first_lines(s: &str, n: usize) -> String {
 
 /// Land a finished subagent's brief in the ledger and UI.
 fn harvest(name: &str, sub: Report, ledger: &mut Ledger, ctl: &Ctl, depth: u8, turn: u32, rep: &mut Report) {
+    ctl.emit(Ev::SubDone(name.to_string()));
     ctl.emit(Ev::Result(
         depth,
         crate::tools::clip(&format!("[{name}] ({} turns) {}", sub.turns, first_lines(&sub.final_msg, 2)), 400),
@@ -746,12 +765,23 @@ impl TurnCtx<'_> {
 
     fn dispatch(&mut self, cmd: Cmd) {
         self.executed += 1;
+        let act = action_of(&cmd);
+        let v = act.chars().next().unwrap_or(' ');
         if let Some(allow) = self.allowed {
-            let v = action_of(&cmd).chars().next().unwrap_or(' ');
             if !allow.contains(&v) && v != 'D' {
                 self.ledger.push(Kind::Result, self.turn, format!("verb {v} not allowed in this profile"), None);
                 return;
             }
+        }
+        // Game-mod style override: a config tool with `override = true` on a
+        // single-line native verb (RGXOV) replaces the built-in — the raw
+        // argument text routes to the mod's command as {args}.
+        if crate::config::OVERRIDABLE_VERBS.contains(v)
+            && self.cfg.tool.get(&v.to_string()).is_some_and(|t| t.override_native)
+        {
+            let args = act.split_once(' ').map(|x| x.1).unwrap_or("").trim().to_string();
+            self.exec_tool(Cmd::Custom { verb: v, args });
+            return;
         }
         match cmd {
             Cmd::Done { msg } => self.done = Some(msg),
@@ -802,7 +832,12 @@ impl TurnCtx<'_> {
                 let root2 = self.root.clone();
                 let p2 = profile.clone();
                 let t2 = task.clone();
-                let ctl2 = self.ctl.clone();
+                let mut ctl2 = self.ctl.clone();
+                // Nested spawns keep the OUTERMOST name: the UI attributes a
+                // grandchild's work to the agent the user can actually see.
+                if ctl2.tag.is_none() {
+                    ctl2.tag = Some(profile.clone());
+                }
                 let d = self.depth;
                 self.pending.push((
                     profile,

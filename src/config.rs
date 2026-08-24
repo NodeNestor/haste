@@ -1,8 +1,12 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-/// Verbs implemented natively in the binary. Config tools must not shadow these.
+/// Verbs implemented natively in the binary. Config tools must not shadow
+/// these — except the single-line ones below, with an explicit override flag.
 pub const NATIVE_VERBS: &str = "REIGNXADVSO";
+/// Natives a tool may replace with `override = true` (game-mod style). The
+/// payload verbs (E/I/N) and protocol verbs (S/D/A) stay native.
+pub const OVERRIDABLE_VERBS: &str = "RGXOV";
 
 #[derive(Deserialize, Clone)]
 pub struct Config {
@@ -227,6 +231,10 @@ pub struct ToolCfg {
     /// Env vars set for this tool's process (mods use this for their config).
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Replace the native implementation of this verb (RGXOV only): the
+    /// command line routes to this tool instead of the built-in.
+    #[serde(default, rename = "override")]
+    pub override_native: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -298,13 +306,13 @@ impl Config {
         };
         let mut cfg: Config = toml::from_str(&text).map_err(|e| format!("config parse: {e}"))?;
         cfg.mod_notes = crate::mods::apply(&mut cfg);
-        for verb in cfg.tool.keys() {
-            let ok = verb.len() == 1
-                && verb.chars().next().unwrap().is_ascii_uppercase()
-                && !NATIVE_VERBS.contains(verb.as_str());
-            if !ok {
+        for (verb, t) in &cfg.tool {
+            let c = verb.chars().next().unwrap_or(' ');
+            let native_ok = !NATIVE_VERBS.contains(c) || (t.override_native && OVERRIDABLE_VERBS.contains(c));
+            if verb.len() != 1 || !c.is_ascii_uppercase() || !native_ok {
                 return Err(format!(
-                    "tool verb '{verb}' must be a single uppercase letter outside {NATIVE_VERBS}"
+                    "tool verb '{verb}' must be a single uppercase letter outside {NATIVE_VERBS} \
+                     (or one of {OVERRIDABLE_VERBS} with override = true)"
                 ));
             }
         }
