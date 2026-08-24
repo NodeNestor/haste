@@ -22,6 +22,12 @@ pub fn workspace_state(root: &Path, shell: &str, instruction_files: &[String]) -
         _ => "X runs sh",
     };
     out.push_str(&format!("os: {os} — {shell_note}\n"));
+    // The model must know WHERE it sits: X and all relative paths resolve
+    // against this root, and without it the model guesses (usually C:).
+    if let Ok(abs) = std::fs::canonicalize(root) {
+        let p = abs.display().to_string();
+        out.push_str(&format!("root: {} — all commands run here\n", p.strip_prefix(r"\\?\").unwrap_or(&p)));
+    }
     if let Some(kind) = project_kind(root) {
         out.push_str(&format!("project: {kind}\n"));
     }
