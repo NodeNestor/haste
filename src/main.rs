@@ -12,10 +12,28 @@ fn main() {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "haste — micro agent harness for wafer-speed inference\n\n\
-             usage: haste [-c config.toml] [-p profile] [-C root] [--tui] [task...]\n       haste update\n\n\
+             usage: haste [-c config.toml] [-p profile] [-C root] [--tui] [task...]\n       haste init | update\n\n\
              With no task, opens the TUI in the current directory.\n\
              Config lookup: -c, ./haste.toml, ~/.haste.toml, built-in default."
         );
+        return;
+    }
+    if args.first().map(String::as_str) == Some("init") {
+        let path = Config::home_config_path();
+        if path.exists() {
+            println!("haste: {} already exists — edit it directly", path.display());
+        } else {
+            match std::fs::write(&path, haste::config::INIT_TOML) {
+                Ok(()) => println!(
+                    "haste: wrote {} — uncomment the block for your provider (Cerebras, Ollama, LM Studio, vLLM, OpenRouter), then just run `haste`",
+                    path.display()
+                ),
+                Err(e) => {
+                    eprintln!("haste: could not write {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            }
+        }
         return;
     }
     if args.first().map(String::as_str) == Some("update") {

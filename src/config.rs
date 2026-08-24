@@ -288,24 +288,80 @@ base_url = "http://127.0.0.1:8000/v1"
 model = "default"
 "#;
 
+/// Starter config written by `haste init` — every popular way to connect,
+/// one uncomment away.
+pub const INIT_TOML: &str = r#"# haste config — point [model] at any OpenAI-compatible endpoint and go.
+# Full reference of every knob: https://github.com/NodeNestor/haste/blob/master/haste.toml
+
+[model]
+# --- pick ONE block, uncomment, done ---
+
+# Cerebras (wafer-speed; get a key at cloud.cerebras.ai):
+# base_url = "https://api.cerebras.ai/v1"
+# model = "zai-glm-4.7"
+# api_key_env = "CEREBRAS_API_KEY"        # name of the env var holding your key
+
+# Ollama (local):
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "qwen3.5:9b"
+
+# LM Studio (local):
+# base_url = "http://127.0.0.1:1234/v1"
+# model = "local-model"
+
+# vLLM / llama.cpp server (local):
+base_url = "http://127.0.0.1:8000/v1"
+model = "default"
+
+# OpenRouter:
+# base_url = "https://openrouter.ai/api/v1"
+# model = "qwen/qwen3.5-coder"
+# api_key_env = "OPENROUTER_API_KEY"
+
+max_tokens = 8192
+temperature = 0.7
+prefix_cache = true      # provider caches prompt prefixes (vLLM/llama.cpp/Cerebras: yes)
+
+[context]
+mode = "append"          # prefix-cache friendly; use "working_set" if your provider has no cache
+budget_tokens = 40000
+
+[verify]
+# cmd = "cargo test"     # auto-runs after every editing turn; failing verify blocks D
+"#;
+
 impl Config {
+    /// User-facing path for `haste init` and the first-run hint.
+    pub fn home_config_path() -> std::path::PathBuf {
+        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+        std::path::Path::new(&home).join(".haste.toml")
+    }
+
     pub fn load(path: Option<&str>) -> Result<Config, String> {
         // Lookup chain: explicit -c, ./haste.toml, ~/.haste.toml, embedded default —
         // so `haste` works from any directory once ~/.haste.toml exists.
+        let mut found = true;
         let text = match path {
             Some(p) => std::fs::read_to_string(p).map_err(|e| format!("config {p}: {e}"))?,
             None => std::fs::read_to_string("haste.toml")
-                .or_else(|_| {
-                    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"));
-                    home.map_err(|_| ()).and_then(|h| {
-                        std::fs::read_to_string(std::path::Path::new(&h).join(".haste.toml"))
-                            .map_err(|_| ())
-                    })
-                })
-                .unwrap_or_else(|_| DEFAULT_TOML.to_string()),
+                .or_else(|_| std::fs::read_to_string(Self::home_config_path()).map_err(|_| ()))
+                .unwrap_or_else(|_| {
+                    found = false;
+                    DEFAULT_TOML.to_string()
+                }),
         };
         let mut cfg: Config = toml::from_str(&text).map_err(|e| format!("config parse: {e}"))?;
         cfg.mod_notes = crate::mods::apply(&mut cfg);
+        if !found {
+            cfg.mod_notes.insert(
+                0,
+                format!(
+                    "no config found — using built-in default ({}). Run `haste init` to create {}",
+                    cfg.model.base_url,
+                    Self::home_config_path().display()
+                ),
+            );
+        }
         for (verb, t) in &cfg.tool {
             let c = verb.chars().next().unwrap_or(' ');
             let native_ok = !NATIVE_VERBS.contains(c) || (t.override_native && OVERRIDABLE_VERBS.contains(c));

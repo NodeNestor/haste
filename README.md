@@ -32,7 +32,9 @@ irm https://raw.githubusercontent.com/NodeNestor/haste/master/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/NodeNestor/haste/master/install.sh | sh
 ```
 
-`haste update` self-updates from the latest release. Or `cargo build --release`.
+`haste init` writes a starter config with provider presets (Cerebras, Ollama, LM
+Studio, vLLM, OpenRouter) — uncomment one block and go. `haste update`
+self-updates from the latest release. Or `cargo build --release`.
 
 ## Run
 

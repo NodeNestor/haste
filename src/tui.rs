@@ -45,6 +45,8 @@ struct App {
     plan: String,
     spin: usize,
     started: Option<Instant>,
+    /// One-shot background notices (/update result etc.), polled like events.
+    notice_rx: Option<Receiver<String>>,
     rx: Option<Receiver<Ev>>,
     sess_rx: Option<Receiver<Session>>,
     session: Option<Session>,
@@ -78,7 +80,7 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
         log: {
             let mut l = vec![
                 (DIM, format!("haste · {} · {}", cfg.model.model, root.display())),
-                (DIM, "Enter task · :cd <path> · F2 stream · Esc stop · :q quit".into()),
+                (DIM, "Enter task · /help for commands · Esc stop · /q quit".into()),
             ];
             for n in &cfg.mod_notes {
                 l.push((DIM, format!("  {n}")));
@@ -99,6 +101,7 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
         plan: String::new(),
         spin: 0,
         started: None,
+        notice_rx: None,
         rx: None,
         sess_rx: None,
         session: None,
@@ -116,6 +119,13 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, out: &mut impl Write) -> io::Resu
             if let Ok(msg) = rx.try_recv() {
                 app.push(DIM, format!("  {msg}"));
                 update_rx = None;
+                dirty = true;
+            }
+        }
+        if let Some(rx) = &app.notice_rx {
+            if let Ok(msg) = rx.try_recv() {
+                app.push(DIM, format!("  {msg}"));
+                app.notice_rx = None;
                 dirty = true;
             }
         }
@@ -263,25 +273,8 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
     if line.is_empty() {
         return;
     }
-    if let Some(rest) = line.strip_prefix(":cd ") {
-        if app.running {
-            app.push(DIM, "  (busy — :cd after the run finishes)".into());
-            return;
-        }
-        let p = PathBuf::from(rest.trim());
-        match p.canonicalize() {
-            Ok(abs) if abs.is_dir() => {
-                app.push(DIM, format!("  root → {} (new session)", abs.display()));
-                app.root = abs;
-                app.session = None;
-            }
-            _ => app.push(DIM, format!("  no such directory: {rest}")),
-        }
-        return;
-    }
-    if line == ":q" {
-        app.quit = true;
-        return;
+    if let Some(cmd) = line.strip_prefix('/').or_else(|| line.strip_prefix(':')) {
+        return command(app, cfg, cmd.trim());
     }
     if app.running {
         // Talk to the leader mid-run: the message lands in its context at the
@@ -322,6 +315,76 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
         );
         let _ = sess_tx.send(session);
     });
+}
+
+/// Slash (or colon) commands — the TUI's own controls, never sent to the model.
+fn command(app: &mut App, cfg: &Arc<Config>, cmd: &str) {
+    let (verb, rest) = cmd.split_once(' ').unwrap_or((cmd, ""));
+    match verb {
+        "help" | "?" => {
+            for l in [
+                "/cd <path>   switch workspace (fresh session)",
+                "/new         fresh session in the same workspace",
+                "/mods        show loaded mods",
+                "/stream      toggle the live stream pane (F2)",
+                "/update      self-update from the latest release",
+                "/q           quit  ·  Esc stops a run  ·  type mid-run to steer",
+            ] {
+                app.push(DIM, format!("  {l}"));
+            }
+        }
+        "cd" => {
+            if app.running {
+                app.push(DIM, "  (busy — /cd after the run finishes)".into());
+                return;
+            }
+            match PathBuf::from(rest.trim()).canonicalize() {
+                Ok(abs) if abs.is_dir() => {
+                    app.push(DIM, format!("  root → {} (new session)", abs.display()));
+                    app.root = abs;
+                    app.session = None;
+                }
+                _ => app.push(DIM, format!("  no such directory: {rest}")),
+            }
+        }
+        "new" => {
+            if app.running {
+                app.push(DIM, "  (busy — /new after the run finishes)".into());
+                return;
+            }
+            app.session = None;
+            app.plan.clear();
+            app.agents.clear();
+            app.ctx_tokens = 0;
+            app.push(DIM, "  (fresh session)".into());
+        }
+        "mods" => {
+            if cfg.mod_notes.is_empty() {
+                app.push(DIM, format!("  no mods loaded ({})", cfg.mods_dir));
+            }
+            for n in &cfg.mod_notes {
+                app.push(DIM, format!("  {n}"));
+            }
+        }
+        "stream" => app.stream_on = !app.stream_on,
+        "update" => {
+            if app.notice_rx.is_some() {
+                return;
+            }
+            app.push(DIM, "  (checking for updates…)".into());
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.notice_rx = Some(rx);
+            std::thread::spawn(move || {
+                let msg = match crate::update::self_update() {
+                    Ok(m) => m,
+                    Err(e) => format!("update failed — {e}"),
+                };
+                let _ = tx.send(msg);
+            });
+        }
+        "q" | "quit" | "exit" => app.quit = true,
+        _ => app.push(DIM, format!("  unknown command /{verb} — /help lists them")),
+    }
 }
 
 fn wrap_into(dst: &mut Vec<(u8, String)>, kind: u8, line: &str, w: usize) {
