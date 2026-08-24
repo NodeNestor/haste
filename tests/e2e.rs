@@ -890,3 +890,21 @@ fn plan_with_trailing_commas_still_parses() {
     assert_eq!(plan.steps[0].id, "a");
     let _ = std::fs::remove_file(p);
 }
+
+#[test]
+fn blocked_step_cannot_be_marked_done() {
+    let port = mock_server(vec![
+        // s2 depends on s1 (still todo) — the model lies s2 done anyway.
+        "N plan.json\n{\"goal\":\"gate\",\"steps\":[{\"id\":\"s1\",\"what\":\"first\",\"status\":\"todo\"},{\"id\":\"s2\",\"what\":\"second\",\"status\":\"done\",\"needs\":[\"s1\"]}]}\n.\n",
+        // After the revert note: do it in order.
+        "N plan.json\n{\"goal\":\"gate\",\"steps\":[{\"id\":\"s1\",\"what\":\"first\",\"status\":\"done\"},{\"id\":\"s2\",\"what\":\"second\",\"status\":\"done\",\"needs\":[\"s1\"]}]}\n.\nD in order\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "gated", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "in order");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("BLOCKED by open step"), "no gate note in ledger");
+    let plan = std::fs::read_to_string(root.join("plan.json")).unwrap();
+    assert!(plan.contains("\"done\""), "{plan}");
+    let _ = std::fs::remove_dir_all(root);
+}

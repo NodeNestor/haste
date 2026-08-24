@@ -1026,6 +1026,30 @@ fn plan_tick(
         if !newly_done {
             continue;
         }
+        // Dependency gate: done on a step whose needs are still open gets the
+        // same treatment as a failing verify — reverted, with the reason.
+        let unmet: Vec<String> = p.steps[i]
+            .needs
+            .clone()
+            .into_iter()
+            .filter(|n| p.steps.iter().any(|o| o.id == *n && o.status != "done" && o.status != "skip"))
+            .collect();
+        if !unmet.is_empty() {
+            p.steps[i].status = "doing".into();
+            dirty = true;
+            note(
+                ledger,
+                ctl,
+                depth,
+                turn,
+                format!(
+                    "(plan step '{id}' marked done but it is BLOCKED by open step{}: {} — finish those first)",
+                    if unmet.len() == 1 { "" } else { "s" },
+                    unmet.join(", ")
+                ),
+            );
+            continue;
+        }
         if let Some(v) = p.steps[i].verify.clone() {
             let out = run_shell(&v, root, DEFAULT_TOOL_TIMEOUT_MS, shell);
             if !out.starts_with("ok") {
@@ -1143,7 +1167,9 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
         "Plan: for multi-step work, create {plan_file} with N — \
          {{\"goal\":\"...\",\"steps\":[{{\"id\":\"..\",\"what\":\"..\",\"status\":\"todo\",\"needs\":[],\"verify\":\"shell cmd\"}}]}}. \
          It is a live state machine you keep current by editing it (status: todo/doing/done/skip). \
-         Marking a step done runs its verify automatically and REVERTS the status if it fails. \
+         Marking a step done runs its verify automatically and REVERTS the status if it fails — \
+         and REVERTS it too while any step in its needs is still open. \
+         Steps whose needs are all met are INDEPENDENT: work them in parallel (one subagent per step). \
          D is refused while steps are open — finish them or descope with status \"skip\".\n"
     ));
     s
