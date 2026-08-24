@@ -140,6 +140,9 @@ pub fn run_session(
     // are harvested at the top of each turn; D waits for stragglers.
     // (profile, task, handle) — task kept for duplicate-spawn refusal.
     let mut pending: Vec<(String, String, std::thread::JoinHandle<Report>)> = Vec::new();
+    // Background auto-verify: (ok, ready-to-inject note). Spawned after an
+    // editing turn, harvested at a turn top, force-joined by D.
+    let mut verify_bg: Option<std::thread::JoinHandle<(bool, String)>> = None;
     // Loop breaker: per exact command, how many times in a row it produced the
     // exact same result. 3 → warn; 5 → refuse to execute it again.
     let mut repeats: std::collections::HashMap<u64, (u32, u64)> = std::collections::HashMap::new();
@@ -185,6 +188,16 @@ pub fn run_session(
                 harvest(&name, sub, ledger, &ctl, depth, turn, &mut rep);
             } else {
                 k += 1;
+            }
+        }
+
+        // Harvest a finished background verify: its PASS/FAIL note enters the
+        // context like any tool result, without ever having blocked a turn.
+        if verify_bg.as_ref().is_some_and(|h| h.is_finished()) {
+            if let Some(h) = verify_bg.take() {
+                if let Ok((_, text)) = h.join() {
+                    note(ledger, &ctl, depth, turn, text);
+                }
             }
         }
 
@@ -364,28 +377,27 @@ pub fn run_session(
         rep.commands += tc.executed;
         rep.tool_ms += tc.tool_us / 1000;
         let TurnCtx { mut done, edited, .. } = tc;
-        // Auto-verify: after any editing turn, run the configured check and
-        // inject its result — the model's explicit "run the tests" turn (the
-        // most common turn in every trajectory) becomes unnecessary. A failing
-        // verify also refuses a same-turn D.
+        // Auto-verify: after any editing turn, the configured check runs in a
+        // BACKGROUND thread — the model keeps working while tests run; the
+        // result is harvested at a later turn top. A D joins the run first
+        // (below), so a failing verify still refuses the same-turn D. The
+        // model's explicit "run the tests" turn stays deleted.
         if edited {
             if let Some(vcmd) = &cfg.verify.cmd {
-                let t_v = Instant::now();
-                let out = run_shell(vcmd, &root, cfg.verify.timeout_ms, &cfg.exec.shell);
-                rep.tool_ms += t_v.elapsed().as_millis();
-                let ok = out.starts_with("ok");
-                let pruned = prune(&cfg.verify.prune, &out);
-                note(
-                    ledger,
-                    &ctl,
-                    depth,
-                    turn,
-                    format!("(auto-verify {}: `{vcmd}`)\n{pruned}", if ok { "PASS" } else { "FAIL" }),
-                );
-                if !ok && done.is_some() && !say_final {
-                    note(ledger, &ctl, depth, turn, "(D refused — auto-verify FAILED after your edits; fix it first)".into());
-                    done = None;
-                }
+                // A fresh edit makes any in-flight verify stale: detach it and
+                // discard — the new run speaks for the current tree.
+                verify_bg = None;
+                let vcmd = vcmd.clone();
+                let root2 = root.clone();
+                let shell = cfg.exec.shell.clone();
+                let spec = cfg.verify.prune.clone();
+                let tmo = cfg.verify.timeout_ms;
+                verify_bg = Some(std::thread::spawn(move || {
+                    let out = run_shell(&vcmd, &root2, tmo, &shell);
+                    let ok = out.starts_with("ok");
+                    let text = format!("(auto-verify {}: `{vcmd}`)\n{}", if ok { "PASS" } else { "FAIL" }, prune(&spec, &out));
+                    (ok, text)
+                }));
             }
         }
 
@@ -403,6 +415,23 @@ pub fn run_session(
         }
 
         if let Some(msg) = done {
+            // A pending background verify gets the first word on finishing:
+            // join it now, so a failing check still refuses the same D that
+            // rode in with the edits. Solo-S mic-backs are conversation.
+            if !say_final {
+                if let Some(h) = verify_bg.take() {
+                    if !h.is_finished() {
+                        ctl.emit(Ev::Result(depth, "(waiting on auto-verify before finishing…)".into()));
+                    }
+                    if let Ok((ok, text)) = h.join() {
+                        note(ledger, &ctl, depth, turn, text);
+                        if !ok {
+                            note(ledger, &ctl, depth, turn, "(D refused — auto-verify FAILED after your edits; fix it first)".into());
+                            continue;
+                        }
+                    }
+                }
+            }
             // The plan state machine gets the last word on finishing: verify
             // any statuses changed THIS turn, then refuse D while steps are
             // open. Solo-S mic-backs are conversation, not completion — exempt.
