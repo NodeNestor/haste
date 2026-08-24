@@ -1021,8 +1021,21 @@ fn plan_tick(
     let mut dirty = false;
     for i in 0..p.steps.len() {
         let id = p.steps[i].id.clone();
-        let newly_done = p.steps[i].status == "done"
-            && seen.get(&id).map(String::as_str).unwrap_or("todo") != "done";
+        let prev = seen.get(&id).map(String::as_str).unwrap_or("todo");
+        // Step kickoff: entering "doing" gets the per-step protocol — orient
+        // first, commit to an approach, then build; the verify gate closes it.
+        if p.steps[i].status == "doing" && prev == "todo" {
+            note(
+                ledger,
+                ctl,
+                depth,
+                turn,
+                format!(
+                    "(step '{id}' started — protocol: 1. RESEARCH the code it touches (O/G/R), 2. state your approach in ONE S line, 3. implement, 4. its verify decides done)"
+                ),
+            );
+        }
+        let newly_done = p.steps[i].status == "done" && prev != "done";
         if !newly_done {
             continue;
         }

@@ -908,3 +908,18 @@ fn blocked_step_cannot_be_marked_done() {
     assert!(plan.contains("\"done\""), "{plan}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn step_kickoff_protocol_fires_on_doing_transition() {
+    let port = mock_server(vec![
+        "N plan.json\n{\"goal\":\"kick\",\"steps\":[{\"id\":\"s1\",\"what\":\"the work\",\"status\":\"todo\"}]}\n.\n",
+        "E 0 1:1\n{\"goal\":\"kick\",\"steps\":[{\"id\":\"s1\",\"what\":\"the work\",\"status\":\"doing\"}]}\n.\n",
+        "E 0 1:1\n{\"goal\":\"kick\",\"steps\":[{\"id\":\"s1\",\"what\":\"the work\",\"status\":\"done\"}]}\n.\nD kicked\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "go", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "kicked");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("step 's1' started — protocol"), "no kickoff note");
+    let _ = std::fs::remove_dir_all(root);
+}
