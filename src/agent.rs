@@ -350,14 +350,28 @@ pub fn run_session(
         }
         empty_turns = 0;
 
+        // Prose mixed into a command turn vanishes silently — the classic
+        // symptom is "here are the results:" followed by a list the user
+        // never sees. Tell the model exactly what it lost.
+        if lexer.dropped > 0 {
+            tc.note(format!(
+                "({} plain-prose line{} DISCARDED — anything meant for the user must be inside one S line or the D message)",
+                lexer.dropped,
+                if lexer.dropped == 1 { " was" } else { "s were" }
+            ));
+        }
+
         // A turn that is ONLY talk (S with no work and no subagents pending)
         // means the model is waiting on the user: hand the mic back instead of
         // looping into ever-rephrased clarification questions.
+        // (dropped >= 3 means a whole prose block was lost — the model was
+        // mid-report, not waiting on the user: let it retry with the note.)
         let mut say_final = false;
         if tc.executed == 0
             && tc.pending.is_empty()
             && !tail.is_empty()
             && tail.iter().all(|c| matches!(c, Cmd::Say { .. }))
+            && lexer.dropped < 3
         {
             say_final = true;
             tc.executed += tail.len();
@@ -376,7 +390,7 @@ pub fn run_session(
         }
         rep.commands += tc.executed;
         rep.tool_ms += tc.tool_us / 1000;
-        let TurnCtx { mut done, edited, .. } = tc;
+        let TurnCtx { done, edited, .. } = tc;
         // Auto-verify: after any editing turn, the configured check runs in a
         // BACKGROUND thread — the model keeps working while tests run; the
         // result is harvested at a later turn top. A D joins the run first
@@ -384,9 +398,8 @@ pub fn run_session(
         // model's explicit "run the tests" turn stays deleted.
         if edited {
             if let Some(vcmd) = &cfg.verify.cmd {
-                // A fresh edit makes any in-flight verify stale: detach it and
-                // discard — the new run speaks for the current tree.
-                verify_bg = None;
+                // A fresh edit makes any in-flight verify stale: the handle is
+                // replaced below, detaching the old thread; its result is discarded.
                 let vcmd = vcmd.clone();
                 let root2 = root.clone();
                 let shell = cfg.exec.shell.clone();

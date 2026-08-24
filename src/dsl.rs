@@ -43,6 +43,9 @@ pub struct Lexer {
     buf: String,
     pending: Option<(Pending, Vec<String>)>,
     done_msg: Option<String>,
+    /// Non-empty lines that parsed as nothing and were silently dropped —
+    /// usually the model narrating in prose that the user never sees.
+    pub dropped: usize,
 }
 
 impl Default for Lexer {
@@ -53,7 +56,7 @@ impl Default for Lexer {
 
 impl Lexer {
     pub fn new() -> Lexer {
-        Lexer { buf: String::new(), pending: None, done_msg: None }
+        Lexer { buf: String::new(), pending: None, done_msg: None, dropped: 0 }
     }
 
     pub fn feed(&mut self, chunk: &str, out: &mut Vec<Cmd>) {
@@ -104,7 +107,8 @@ impl Lexer {
         let verb = it.next().unwrap_or("");
         let rest = it.next().unwrap_or("").trim();
         if verb.len() != 1 {
-            return; // prose/noise line: ignored
+            self.dropped += 1; // prose/noise line: ignored
+            return;
         }
         let v = verb.chars().next().unwrap();
         match v {
@@ -173,7 +177,7 @@ impl Lexer {
             c if c.is_ascii_uppercase() => {
                 out.push(Cmd::Custom { verb: c, args: rest.to_string() });
             }
-            _ => {}
+            _ => self.dropped += 1,
         }
     }
 }

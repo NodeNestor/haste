@@ -16,16 +16,19 @@ const SENTINEL: &str = "<<HASTE:DONE";
 /// Daemons kept per workspace; a burst of subagents beyond this pays one-shot.
 const POOL_MAX: usize = 4;
 
-/// The in-shell driver loop. $LASTEXITCODE covers native tools (the common
-/// case: cargo, python, git); terminating errors are caught as exit 1;
-/// non-terminating cmdlet errors surface as text with exit 0 — the model
-/// reads the error either way.
+/// The in-shell driver loop. The command runs as `& {scriptblock} 2>&1` —
+/// NOT Invoke-Expression: in PS 5.1 `iex $cmd 2>&1` does NOT merge errors
+/// raised inside the expression (they bypass to the host's stderr, which is
+/// nulled here), silently eating every cmdlet error. The child scope also
+/// mirrors one-shot semantics: cd/$env: never persist between calls.
+/// Exit code: $LASTEXITCODE for natives (cargo, python, git); any error
+/// record -> 1, matching `powershell -Command`'s behavior closely enough.
 const DRIVER: &str = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; \
     while($true){ $l=[Console]::In.ReadLine(); if($null -eq $l){break}; \
-    $global:LASTEXITCODE=0; $c=0; \
+    $global:LASTEXITCODE=0; $c=0; $Error.Clear(); \
     try{ $b=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($l)); \
-    Invoke-Expression $b 2>&1 | Out-String -Stream | Write-Output; \
-    if($LASTEXITCODE){$c=$LASTEXITCODE} } \
+    & ([ScriptBlock]::Create($b)) 2>&1 | Out-String -Stream | Write-Output; \
+    if($LASTEXITCODE){$c=$LASTEXITCODE} elseif($Error.Count){$c=1} } \
     catch { $_ | Out-String | Write-Output; $c=1 }; \
     Write-Output ('<<HASTE:DONE '+$c+'>>') }";
 
