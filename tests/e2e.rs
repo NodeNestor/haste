@@ -880,3 +880,13 @@ fn pure_prose_turn_is_rescued_as_say() {
     assert_eq!(rep.turns, 1, "prose rescue must not loop");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn plan_with_trailing_commas_still_parses() {
+    let p = std::env::temp_dir().join(format!("haste-plan-{}.json", std::process::id()));
+    std::fs::write(&p, "{\"goal\":\"g\",\"steps\":[{\"id\":\"a\",\"status\":\"todo\",},],}").unwrap();
+    let plan = haste::plan::Plan::load(&p).unwrap().expect("trailing commas must be forgiven");
+    assert_eq!(plan.steps.len(), 1);
+    assert_eq!(plan.steps[0].id, "a");
+    let _ = std::fs::remove_file(p);
+}

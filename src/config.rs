@@ -252,7 +252,7 @@ fn d_ptools() -> String {
     "RGXD".into()
 }
 fn d_pturns() -> u32 {
-    20
+    0 // unlimited, like the leader — the loop guards are the real rails
 }
 fn d_pbudget() -> usize {
     8_000

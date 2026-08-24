@@ -40,6 +40,44 @@ fn d_todo() -> String {
     "todo".into()
 }
 
+/// Strip trailing commas before `}` / `]` — the single most common JSON
+/// mistake weak models make; refusing the whole plan over one is cruel.
+/// String-aware, so a comma inside a "what" text is never touched.
+fn forgive_commas(t: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    let (mut in_str, mut esc) = (false, false);
+    for c in t.chars() {
+        if in_str {
+            out.push(c);
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                out.push(c);
+            }
+            '}' | ']' => {
+                while out.ends_with(|x: char| x.is_whitespace()) {
+                    out.pop();
+                }
+                if out.ends_with(',') {
+                    out.pop();
+                }
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 impl Plan {
     /// None = no plan file; Some(Err) = exists but broken (which blocks D
     /// until fixed — a corrupt state machine must not be quietly ignored).
@@ -50,7 +88,7 @@ impl Plan {
         Some(
             std::fs::read_to_string(path)
                 .map_err(|e| e.to_string())
-                .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())),
+                .and_then(|t| serde_json::from_str(&forgive_commas(&t)).map_err(|e| e.to_string())),
         )
     }
 

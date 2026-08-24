@@ -1086,6 +1086,10 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     if let Some(ps) = profile_system {
         s.push_str(ps);
         s.push('\n');
+        s.push_str(
+            "You are a subagent: the leader is waiting on your brief — finish with D \
+             as soon as you have the answer; do not keep polishing.\n",
+        );
     }
     s.push_str("Commands (one per line):\n");
     if allow('R') { s.push_str("R <id|path> [a:b]   read file, numbered lines\n"); }

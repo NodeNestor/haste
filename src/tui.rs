@@ -483,7 +483,11 @@ fn draw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
         0
     };
     let cw = w - side; // chat width (sidebar text starts after a divider)
-    queue!(out, terminal::Clear(terminal::ClearType::All), cursor::MoveTo(0, 0))?;
+    // Row-wise clearing, never Clear(All): a full-screen clear 4x/second is
+    // visible flicker on classic conhost (and hard on slow terminals).
+    for r in 0..(h.saturating_sub(2)) as u16 {
+        queue!(out, cursor::MoveTo(0, r), terminal::Clear(terminal::ClearType::UntilNewLine))?;
+    }
 
     // The stream pane only takes rows while something is streaming, and only
     // as many as its content needs (capped at half the screen) — otherwise the
@@ -585,6 +589,6 @@ fn draw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     } else {
         prompt
     };
-    queue!(out, cursor::MoveTo(0, (h - 1) as u16), Print(&shown))?;
+    queue!(out, cursor::MoveTo(0, (h - 1) as u16), terminal::Clear(terminal::ClearType::UntilNewLine), Print(&shown))?;
     out.flush()
 }
