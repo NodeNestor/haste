@@ -1,28 +1,59 @@
 # haste — everything moddable lives here. The binary never changes.
+#
+# Lookup order: -c <path> · ./haste.toml · ~/.haste.toml · built-in default.
+# Every key below is optional except [model] base_url + model; commented
+# lines show the default.
 
 [model]
-base_url = "http://127.0.0.1:18081/v1"   # Qwen3.8-27B-FP8 on vLLM
-model = "q38"
-# api_key_env = "CEREBRAS_API_KEY"
+base_url = "http://127.0.0.1:18081/v1"   # any OpenAI-compatible /chat/completions endpoint
+model = "q38"                             # model name sent in the request body
+# api_key_env = "CEREBRAS_API_KEY"        # env VAR NAME holding the bearer key (never the key itself)
 max_tokens = 8192                         # big files must fit in one payload; cuts trigger rewrite loops
-temperature = 0.7                         # temp 0 makes Qwen FP8 degenerate into !!!! spam
-prefix_cache = true                       # llama.cpp/vLLM: true, Cerebras: false
+temperature = 0.7                         # temp 0 makes Qwen FP8 degenerate into !!!! spam; < 0 = don't send the field
+prefix_cache = true                       # provider has a token-prefix cache (llama.cpp/vLLM: true, Cerebras: false)
 
-[model.extra_body]
+[model.extra_body]                        # merged VERBATIM into every request — provider quirks live here, not in code
 top_p = 0.8                               # Qwen-recommended sampling
 repetition_penalty = 1.05
 
 [model.extra_body.chat_template_kwargs]
 enable_thinking = false                   # no reasoning — iterate, don't deliberate
 
+[prompt]
+# system = "You are haste, ..."           # replaces the built-in identity line (command reference stays generated)
+# extra = "House rules: ..."              # appended after the rules — same slot mods inject into
+
 [context]
-mode = "append"          # "append" (prefix-cache friendly) | "working_set" (max compression)
-budget_tokens = 40000
+mode = "append"          # "append" (prefix-cache friendly) | "working_set" (max compression, re-rendered every turn)
+budget_tokens = 40000    # ledger render budget; over-budget triggers compaction
 fold_after_turns = 6     # working_set: tool results older than this collapse to one line
 max_turns = 0            # 0 = unlimited; loop breaker + empty-turn abort + Esc are the guards
-result_cap_chars = 12000
+result_cap_chars = 12000 # hard cap on any single tool result, applied before pruners
+# bootstrap = true       # pin a workspace orientation block (os/project/git/layout) at ledger head
+# compact = "model"      # over-budget: "model" (prompt-cached self-summary) | "structural" (mechanical folding)
+# compact_keep_last = 10 # ledger entries kept verbatim behind a model-compaction seal
+# instruction_files = ["HASTE.md", "AGENTS.md", "CLAUDE.md"]  # project instructions pinned into bootstrap when present
 
-# ---- config-declared tools: one uppercase verb (outside REIGNXAD) each ----
+[exec]
+# shell = "powershell"   # what X runs: "powershell" | "cmd" | "sh" (default: powershell on Windows, sh elsewhere)
+
+[verify]
+# cmd = "cargo test"     # runs automatically after every editing turn; failing verify refuses a same-turn D
+# timeout_ms = 180000
+# prune = "first_failure"
+
+[plan]
+# file = "plan.json"     # the live plan state machine the model edits
+# enforce = true         # refuse D while steps are open; auto-verify steps marked done
+
+[distill]
+max_tokens = 400
+# prompt = "Extract only the facts relevant to the task below. Terse bullet lines, no prose. TASK: {task}\n---\n{text}"
+
+# mods_dir = "~/.haste/mods"  # each subdir with a mod.toml adds verbs/prompt/env — see examples/mods/
+
+# ---- config-declared tools: one uppercase verb (outside REIGNXADVSO) each ----
+# prune chain: head_tail:A,B | first_failure | errors_only | drop:REGEX | keep:REGEX | distill | none
 
 [tool.T]
 desc = "run tests (first failure only)"
@@ -45,12 +76,12 @@ desc = "screenshot the screen to shot.png (then V shot.png to see it)"
 cmd = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $bmp.Save('shot.png'); 'shot.png saved'"
 timeout_ms = 20000
 
-# ---- subagent profiles ----
+# ---- subagent profiles: spawned with `A <profile> <task>`, run in parallel ----
 
 [profile.researcher]
 system = "You research. Gather facts fast, never edit files. Your D message is a terse brief of findings."
-tools = "RGXWVP"
-max_turns = 0
+tools = "RGXWVP"         # verb letters this profile may use
+max_turns = 0            # 0 = unlimited
 budget_tokens = 8000
 
 [profile.fixer]
@@ -58,7 +89,3 @@ system = "You fix exactly the issue in the task. Verify with C/T before D."
 tools = "REIGNXTCV"
 max_turns = 0
 budget_tokens = 10000
-
-[distill]
-max_tokens = 400
-# prompt = "Extract only the facts relevant to the task below. Terse bullet lines, no prose. TASK: {task}\n---\n{text}"

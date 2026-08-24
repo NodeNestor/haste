@@ -80,7 +80,12 @@ impl Session {
         let tee = (depth == 0).then(|| root.join(".haste").join("ledger.jsonl"));
         let mut ledger = Ledger::new(tee.as_deref());
         if depth == 0 && cfg.context.bootstrap {
-            ledger.push(Kind::Pin, 0, crate::bootstrap::workspace_state(&root, &cfg.exec.shell), None);
+            ledger.push(
+                Kind::Pin,
+                0,
+                crate::bootstrap::workspace_state(&root, &cfg.exec.shell, &cfg.context.instruction_files),
+                None,
+            );
         }
         Session {
             ledger,
@@ -877,10 +882,13 @@ fn cap(s: String, max: usize) -> String {
 
 fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str>) -> String {
     let allow = |v: char| allowed.is_none_or(|a| a.contains(v));
-    let mut s = String::from(
-        "You are haste, a fast coding agent. You act ONLY by emitting command lines. \
-         No prose, no markdown, no explanations — command lines only.\n",
-    );
+    let mut s = match &cfg.prompt.system {
+        Some(id) => format!("{}\n", id.trim_end()),
+        None => String::from(
+            "You are haste, a fast coding agent. You act ONLY by emitting command lines. \
+             No prose, no markdown, no explanations — command lines only.\n",
+        ),
+    };
     if let Some(ps) = profile_system {
         s.push_str(ps);
         s.push('\n');
@@ -923,6 +931,10 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     );
     if !cfg.prompt_extra.is_empty() {
         s.push_str(&cfg.prompt_extra);
+    }
+    if !cfg.prompt.extra.trim().is_empty() {
+        s.push_str(cfg.prompt.extra.trim());
+        s.push('\n');
     }
     if let Some(v) = &cfg.verify.cmd {
         s.push_str(&format!(

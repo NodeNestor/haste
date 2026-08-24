@@ -21,6 +21,8 @@ pub struct Config {
     pub plan: PlanCfg,
     #[serde(default)]
     pub verify: VerifyCfg,
+    #[serde(default)]
+    pub prompt: PromptCfg,
     /// Folder mods live here; each subdir with a mod.toml adds verbs/prompt.
     #[serde(default = "d_mods_dir")]
     pub mods_dir: String,
@@ -33,6 +35,19 @@ pub struct Config {
 }
 fn d_mods_dir() -> String {
     "~/.haste/mods".into()
+}
+
+/// System-prompt shaping. The command reference, rules, and plan protocol are
+/// always generated (they must match what the binary parses); these hooks
+/// replace the identity line and append free text after the rules.
+#[derive(Deserialize, Clone, Default)]
+pub struct PromptCfg {
+    /// Replaces the built-in "You are haste…" identity line entirely.
+    #[serde(default)]
+    pub system: Option<String>,
+    /// Appended verbatim after the rules (same slot mods inject into).
+    #[serde(default)]
+    pub extra: String,
 }
 
 /// Auto-verify: run this command automatically after any turn that edited
@@ -143,6 +158,13 @@ pub struct CtxCfg {
     pub compact: String,
     #[serde(default = "d_compact_keep")]
     pub compact_keep_last: usize,
+    /// Project instruction files (CLAUDE.md / AGENTS.md style) pinned into the
+    /// bootstrap block when they exist at the workspace root, in this order.
+    #[serde(default = "d_instruction_files")]
+    pub instruction_files: Vec<String>,
+}
+fn d_instruction_files() -> Vec<String> {
+    vec!["HASTE.md".into(), "AGENTS.md".into(), "CLAUDE.md".into()]
 }
 fn d_compact() -> String {
     "model".into()
@@ -179,6 +201,7 @@ impl Default for CtxCfg {
             bootstrap: true,
             compact: d_compact(),
             compact_keep_last: d_compact_keep(),
+            instruction_files: d_instruction_files(),
         }
     }
 }

@@ -10,8 +10,10 @@ use std::process::Command;
 
 const MAX_CHARS: usize = 3000;
 const TREE_DEPTH: usize = 3;
+/// Cap per instruction file (CLAUDE.md and friends can be essays).
+const INSTRUCTIONS_MAX: usize = 2000;
 
-pub fn workspace_state(root: &Path, shell: &str) -> String {
+pub fn workspace_state(root: &Path, shell: &str, instruction_files: &[String]) -> String {
     let mut out = String::from("--- workspace ---\n");
     let os = if cfg!(windows) { "Windows" } else { "unix" };
     let shell_note = match shell {
@@ -28,6 +30,18 @@ pub fn workspace_state(root: &Path, shell: &str) -> String {
     if root.join(".git").exists() {
         if let Some(g) = git_state(root) {
             out.push_str(&g);
+        }
+    }
+    // Project instructions (CLAUDE.md / AGENTS.md style): the humans already
+    // wrote down how to work in this repo — pin it instead of rediscovering it.
+    for f in instruction_files {
+        if let Ok(text) = std::fs::read_to_string(root.join(f)) {
+            let text = text.trim();
+            if !text.is_empty() {
+                out.push_str(&format!("--- {f} (project instructions) ---\n"));
+                out.push_str(&crate::tools::clip(text, INSTRUCTIONS_MAX));
+                out.push('\n');
+            }
         }
     }
     out.push_str("layout (paths below are RELATIVE to the workspace root):\n");
@@ -137,7 +151,7 @@ mod tests {
 
     #[test]
     fn orients_in_own_repo() {
-        let s = workspace_state(Path::new("."), "powershell");
+        let s = workspace_state(Path::new("."), "powershell", &[]);
         assert!(s.contains("project: Rust"), "{s}");
         assert!(s.contains("PowerShell"), "{s}");
         // src/ has >10 files, so the map falls back to extension counts.
@@ -153,9 +167,22 @@ mod tests {
         std::fs::create_dir_all(&p).unwrap();
         std::fs::write(p.join("x.py"), "pass\n").unwrap();
         let t = std::time::Instant::now();
-        let s = workspace_state(&p, "cmd");
+        let s = workspace_state(&p, "cmd", &[]);
         assert!(t.elapsed().as_millis() < 100, "bootstrap slow: {:?}", t.elapsed());
         assert!(!s.contains("git:"), "{s}");
+        let _ = std::fs::remove_dir_all(p);
+    }
+
+    #[test]
+    fn instruction_files_are_pinned_and_capped() {
+        let p = std::env::temp_dir().join(format!("haste-instr-{}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("AGENTS.md"), format!("Always run make lint.\n{}", "x".repeat(5000))).unwrap();
+        let s = workspace_state(&p, "cmd", &["HASTE.md".into(), "AGENTS.md".into()]);
+        assert!(s.contains("AGENTS.md (project instructions)"), "{s}");
+        assert!(s.contains("Always run make lint."), "{s}");
+        assert!(!s.contains("HASTE.md"), "missing file must not appear: {s}");
+        assert!(s.len() < INSTRUCTIONS_MAX + MAX_CHARS + 500, "uncapped: {}", s.len());
         let _ = std::fs::remove_dir_all(p);
     }
 }
