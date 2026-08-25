@@ -62,8 +62,11 @@ fn d_parallel() -> usize {
     1
 }
 
+mod tui;
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let headless = args.iter().position(|a| a == "--headless").map(|i| args.remove(i)).is_some();
     match args.first().map(String::as_str) {
         Some("send") => {
             let (agent, task) = (args.get(1), args[2..].join(" "));
@@ -71,21 +74,24 @@ fn main() {
             if task.trim().is_empty() {
                 usage();
             }
-            let fleet = load_fleet(Path::new("fleet.toml"));
+            // Inside a running fleet, agents inherit SWIFT_FLEET — so
+            // `X swift send scout <text>` works from any workspace.
+            let fleet_path = std::env::var("SWIFT_FLEET").unwrap_or_else(|_| "fleet.toml".into());
+            let fleet = load_fleet(Path::new(&fleet_path));
             let Some(a) = fleet.agent.get(agent) else {
-                eprintln!("swift: no agent '{agent}' in fleet.toml");
+                eprintln!("swift: no agent '{agent}' in {fleet_path}");
                 std::process::exit(2);
             };
             let path = drop_task(Path::new(&a.root), &task);
             println!("swift: queued for {agent}: {}", path.display());
         }
-        Some(p) if p.ends_with(".toml") => run_fleet(Path::new(p)),
+        Some(p) if p.ends_with(".toml") => run_fleet(Path::new(p), headless),
         _ => usage(),
     }
 }
 
 fn usage() -> ! {
-    eprintln!("usage: swift <fleet.toml> | swift send <agent> <task...>");
+    eprintln!("usage: swift <fleet.toml> [--headless] | swift send <agent> <task...>");
     std::process::exit(2);
 }
 
@@ -105,12 +111,12 @@ fn load_fleet(path: &Path) -> Fleet {
     fleet
 }
 
-fn inbox_dir(root: &Path) -> PathBuf {
+pub(crate) fn inbox_dir(root: &Path) -> PathBuf {
     root.join(".swift").join("inbox")
 }
 
 /// Write one task file, timestamp-named so the queue stays ordered.
-fn drop_task(root: &Path, task: &str) -> PathBuf {
+pub(crate) fn drop_task(root: &Path, task: &str) -> PathBuf {
     let dir = inbox_dir(root);
     let _ = std::fs::create_dir_all(&dir);
     let stamp = std::time::SystemTime::now()
@@ -141,56 +147,73 @@ fn next_task(inbox: &Path) -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
-fn run_fleet(path: &Path) {
+fn run_fleet(path: &Path, headless: bool) {
     let fleet = load_fleet(path);
+    // Agents' X commands inherit this, so `swift send` works from anywhere.
+    if let Ok(abs) = path.canonicalize() {
+        std::env::set_var("SWIFT_FLEET", abs);
+    }
+    let names: Vec<String> = fleet.agent.keys().cloned().collect();
     let stop = Arc::new(AtomicBool::new(false));
     let (log_tx, log_rx) = std::sync::mpsc::channel::<(String, Ev)>();
     let mut handles = Vec::new();
     let mut roots: BTreeMap<String, PathBuf> = BTreeMap::new();
     for (name, acfg) in fleet.agent {
-        println!(
-            "swift: {} {} @ {}{}",
-            if acfg.persistent { "persistent" } else { "one-shot " },
-            name,
-            acfg.root,
-            acfg.source.as_deref().map(|s| format!(" ← `{s}`")).unwrap_or_default()
-        );
+        if headless {
+            println!(
+                "swift: {} {} @ {}{}",
+                if acfg.persistent { "persistent" } else { "one-shot " },
+                name,
+                acfg.root,
+                acfg.source.as_deref().map(|s| format!(" ← `{s}`")).unwrap_or_default()
+            );
+        }
         let _ = std::fs::create_dir_all(inbox_dir(Path::new(&acfg.root)));
         roots.insert(name.clone(), PathBuf::from(&acfg.root));
-        handles.push(spawn_agent(name, acfg, log_tx.clone(), Arc::clone(&stop)));
+        handles.push(spawn_agent(name, acfg, names.clone(), log_tx.clone(), Arc::clone(&stop)));
     }
     drop(log_tx);
-    // The manager's whole UI: one multiplexed event log — mirrored into each
-    // agent's own <root>/.swift/log so history survives the console.
+    if headless {
+        headless_log(log_rx, &roots);
+    } else if let Err(e) = tui::run(log_rx, roots, Arc::clone(&stop)) {
+        eprintln!("swift tui: {e}");
+    }
+    stop.store(true, Ordering::Relaxed);
+    std::process::exit(0); // agent threads may be mid-run; the fleet dies with the manager
+}
+
+/// The --headless UI: one multiplexed event log on stdout, mirrored into each
+/// agent's own <root>/.swift/log so history survives the console.
+fn headless_log(log_rx: std::sync::mpsc::Receiver<(String, Ev)>, roots: &BTreeMap<String, PathBuf>) {
     let mut logs: BTreeMap<String, std::fs::File> = BTreeMap::new();
     for (name, ev) in log_rx {
         if let Some(line) = fmt_ev(&ev) {
             println!("[{name}] {line}");
-            if let Some(f) = logs.get_mut(&name) {
-                use std::io::Write;
-                let _ = writeln!(f, "{} {line}", stamp());
-            } else if let Some(root) = roots.get(&name) {
-                if let Ok(f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(root.join(".swift").join("log"))
-                {
-                    logs.insert(name.clone(), f);
-                    if let Some(f) = logs.get_mut(&name) {
-                        use std::io::Write;
-                        let _ = writeln!(f, "{} {line}", stamp());
-                    }
-                }
+            file_log(&mut logs, roots, &name, &line);
+        }
+    }
+}
+
+pub(crate) fn file_log(logs: &mut BTreeMap<String, std::fs::File>, roots: &BTreeMap<String, PathBuf>, name: &str, line: &str) {
+    use std::io::Write;
+    if !logs.contains_key(name) {
+        if let Some(root) = roots.get(name) {
+            if let Ok(f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(root.join(".swift").join("log"))
+            {
+                logs.insert(name.to_string(), f);
             }
         }
     }
-    for h in handles {
-        let _ = h.join();
+    if let Some(f) = logs.get_mut(name) {
+        let _ = writeln!(f, "{} {line}", stamp());
     }
 }
 
 /// HH:MM:SS (UTC) — enough to read a log, no chrono dependency.
-fn stamp() -> String {
+pub(crate) fn stamp() -> String {
     let s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -204,6 +227,7 @@ fn stamp() -> String {
 fn spawn_agent(
     name: String,
     acfg: AgentCfg,
+    all_names: Vec<String>,
     log: Sender<(String, Ev)>,
     stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
@@ -211,7 +235,20 @@ fn spawn_agent(
         let root = PathBuf::from(&acfg.root);
         let inbox = inbox_dir(&root);
         let cfg = match load_agent_config(&acfg, &root) {
-            Ok(c) => Arc::new(c),
+            Ok(mut c) => {
+                // Fleet awareness: agents know their name, their peers, and
+                // how to talk to them. A message is just a task in the
+                // peer's inbox — it lands in their session like a user line.
+                let peers: Vec<&str> =
+                    all_names.iter().map(String::as_str).filter(|n| *n != name).collect();
+                if !peers.is_empty() {
+                    c.prompt_extra.push_str(&format!(
+                        "Fleet: you are agent '{name}'. Peer agents: {}. Send one a message or task with: X swift send <agent> <text> — it arrives in their session as a user message.\n",
+                        peers.join(", ")
+                    ));
+                }
+                Arc::new(c)
+            }
             Err(e) => {
                 let _ = log.send((name.clone(), Ev::Say(format!("config error: {e}"))));
                 return;
@@ -251,13 +288,34 @@ fn spawn_agent(
                     let _ = fwd_log.send((fwd_name.clone(), ev));
                 }
             });
-            let ctl = Ctl { sink: Some(tx), ..Default::default() };
             if acfg.persistent {
                 // One session, one timeline: tasks run inline, sequentially.
+                // While the run is live, a side watcher moves NEW inbox files
+                // straight into Ctl.inbox — they land in the running session
+                // as user messages at the next turn top, exactly like TUI
+                // mid-run steering. Peers talking, the user steering, and
+                // task pickup are all the same channel.
+                let live = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+                let ctl = Ctl { sink: Some(tx), inbox: Some(Arc::clone(&live)), ..Default::default() };
+                let running_flag = Arc::new(AtomicBool::new(true));
+                let (w_inbox, w_live, w_flag) = (inbox.clone(), Arc::clone(&live), Arc::clone(&running_flag));
+                let (w_log, w_name) = (log.clone(), name.clone());
+                let watcher = std::thread::spawn(move || {
+                    while w_flag.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(500));
+                        while let Some(msg) = next_task(&w_inbox) {
+                            let _ = w_log.send((w_name.clone(), Ev::Say(format!("(mid-run message) {msg}"))));
+                            w_live.lock().unwrap().push(msg);
+                        }
+                    }
+                });
                 let s = session.get_or_insert_with(|| Session::new(&cfg, root.clone(), 0));
                 agent::run_session(Arc::clone(&cfg), s, &task, acfg.profile.as_deref(), 0, ctl);
+                running_flag.store(false, Ordering::Relaxed);
+                let _ = watcher.join();
                 let _ = fwd.join();
             } else {
+                let ctl = Ctl { sink: Some(tx), ..Default::default() };
                 // One-shot: fresh session per task, up to `parallel` at once.
                 let cfg2 = Arc::clone(&cfg);
                 let root2 = root.clone();
@@ -322,7 +380,7 @@ fn load_agent_config(acfg: &AgentCfg, root: &Path) -> Result<Config, String> {
     }
 }
 
-fn fmt_ev(ev: &Ev) -> Option<String> {
+pub(crate) fn fmt_ev(ev: &Ev) -> Option<String> {
     Some(match ev {
         Ev::Turn(t) => format!("turn {t}"),
         Ev::Action(_, a) => format!("· {a}"),
