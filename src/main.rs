@@ -97,20 +97,22 @@ fn main() {
         }
     };
     let cfg = match model_choice {
-        Some(name) => {
-            let mut c = (*cfg).clone();
-            match c.models.get(&name).cloned() {
-                Some(m) => {
-                    c.model = m;
-                    Arc::new(c)
-                }
-                None => {
-                    let have: Vec<&str> = c.models.keys().map(String::as_str).collect();
-                    eprintln!("haste: no [models.{name}] in config (available: {})", have.join(", "));
-                    std::process::exit(2);
-                }
+        // Declared [models.*] name, or any model id a known endpoint serves.
+        Some(name) => match haste::client::resolve_model(&cfg, &name) {
+            Some(m) => {
+                let mut c = (*cfg).clone();
+                c.model = m;
+                Arc::new(c)
             }
-        }
+            None => {
+                let have: Vec<&str> = cfg.models.keys().map(String::as_str).collect();
+                eprintln!(
+                    "haste: '{name}' is neither a [models.*] name ({}) nor served by any known endpoint",
+                    have.join(", ")
+                );
+                std::process::exit(2);
+            }
+        },
         None => cfg,
     };
     let cfg = match effort_choice {

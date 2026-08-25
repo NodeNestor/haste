@@ -46,6 +46,9 @@ struct App {
     /// Active [models.*] override (None = the [model] default); applied to
     /// the next task's run, so a switch never disturbs a live run.
     model_override: Option<String>,
+    /// A model resolved by live endpoint discovery (id not declared in
+    /// [models.*]): a full ModelCfg inheriting its endpoint's settings.
+    model_custom: Option<crate::config::ModelCfg>,
     model_label: String,
     /// Active effort preset name (a key in the model's [model.effort.*]).
     effort_override: Option<String>,
@@ -114,6 +117,7 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, initial_task: Option<String>, out
         agents: Vec::new(),
         plan: String::new(),
         model_override: None,
+        model_custom: None,
         model_label: cfg.model.model.clone(),
         effort_override: None,
         spin: 0,
@@ -331,7 +335,15 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
     app.running = true;
     app.turn = 0;
     app.started = Some(Instant::now());
-    let cfg2 = Config::effective(cfg, &app.model_override, &app.effort_override);
+    let base = match &app.model_custom {
+        Some(m) => {
+            let mut c = (**cfg).clone();
+            c.model = m.clone();
+            Arc::new(c)
+        }
+        None => Config::effective(cfg, &app.model_override, &None),
+    };
+    let cfg2 = Config::effective(&base, &None, &app.effort_override);
     let mut session = app
         .session
         .take()
@@ -394,24 +406,41 @@ fn command(app: &mut App, cfg: &Arc<Config>, cmd: &str) {
         }
         "model" => {
             if rest.is_empty() {
+                // Adaptive listing: declared alternates PLUS a live query of
+                // every known endpoint for everything it actually serves.
                 app.push(DIM, format!("  model: {}", app.model_label));
-                if cfg.models.is_empty() {
-                    app.push(DIM, "  no [models.*] alternates in config — add one to switch".into());
-                } else {
+                if !cfg.models.is_empty() {
                     let names: Vec<&str> = cfg.models.keys().map(String::as_str).collect();
-                    app.push(DIM, format!("  alternates: {} · /model <name> switches, /model default resets", names.join(", ")));
+                    app.push(DIM, format!("  declared: {}", names.join(", ")));
                 }
+                let mut seen = std::collections::HashSet::new();
+                for ep in std::iter::once(&cfg.model).chain(cfg.models.values()) {
+                    if !seen.insert(ep.base_url.clone()) {
+                        continue;
+                    }
+                    let ids = crate::client::served_ids(ep);
+                    if !ids.is_empty() {
+                        app.push(DIM, format!("  {} serves: {}", ep.base_url, ids.join(", ")));
+                    }
+                }
+                app.push(DIM, "  /model <name-or-id> switches · /model default resets".into());
             } else if rest == "default" {
                 app.model_override = None;
+                app.model_custom = None;
                 app.model_label = cfg.model.model.clone();
                 app.push(DIM, format!("  model → {} (default; applies from the next task)", app.model_label));
             } else if let Some(m) = cfg.models.get(rest) {
                 app.model_override = Some(rest.to_string());
+                app.model_custom = None;
                 app.model_label = m.model.clone();
                 app.push(DIM, format!("  model → {} @ {} (applies from the next task)", m.model, m.base_url));
+            } else if let Some(m) = crate::client::resolve_model(cfg, rest) {
+                app.model_label = m.model.clone();
+                app.push(DIM, format!("  model → {} @ {} (discovered; applies from the next task)", m.model, m.base_url));
+                app.model_override = None;
+                app.model_custom = Some(m);
             } else {
-                let names: Vec<&str> = cfg.models.keys().map(String::as_str).collect();
-                app.push(DIM, format!("  no [models.{rest}] — available: {}", names.join(", ")));
+                app.push(DIM, format!("  '{rest}' is neither a [models.*] name nor served by any known endpoint — /model lists them"));
             }
         }
         "effort" => {

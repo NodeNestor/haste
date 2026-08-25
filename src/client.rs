@@ -21,6 +21,49 @@ pub struct StreamStats {
     pub completion_tokens: u64,
 }
 
+/// Model ids served by one endpoint (GET /models). Short timeout: the TUI
+/// calls this interactively. Failures are an empty list, never an error.
+pub fn served_ids(ep: &ModelCfg) -> Vec<String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(3))
+        .build();
+    let url = format!("{}/models", ep.base_url.trim_end_matches('/'));
+    let mut req = agent.get(&url);
+    if let Some(k) = ep.api_key_env.as_deref().and_then(|v| std::env::var(v).ok()) {
+        req = req.set("Authorization", &format!("Bearer {k}"));
+    }
+    let Ok(resp) = req.call() else { return Vec::new() };
+    let Ok(v) = resp.into_json::<Value>() else { return Vec::new() };
+    v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect()
+}
+
+/// Resolve a /model target: a declared [models.<name>] wins; otherwise every
+/// KNOWN endpoint ([model] + all alternates) is asked what it serves, and a
+/// matching id inherits that endpoint's settings with the id swapped in.
+/// Declare an endpoint once, use every model on it by name.
+pub fn resolve_model(cfg: &crate::config::Config, name: &str) -> Option<ModelCfg> {
+    if let Some(m) = cfg.models.get(name) {
+        return Some(m.clone());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for ep in std::iter::once(&cfg.model).chain(cfg.models.values()) {
+        if !seen.insert(ep.base_url.clone()) {
+            continue;
+        }
+        if served_ids(ep).iter().any(|i| i == name) {
+            let mut m = ep.clone();
+            m.model = name.to_string();
+            return Some(m);
+        }
+    }
+    None
+}
+
 impl Client {
     pub fn new(cfg: ModelCfg, key: Option<String>) -> Client {
         let agent = ureq::AgentBuilder::new()
