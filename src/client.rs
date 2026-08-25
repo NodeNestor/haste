@@ -149,8 +149,9 @@ impl Client {
         let (mut prev2, mut pair_run) = ('\0', 0u32);
         // Phrase-loop detection: a rolling tail of recent output, scanned for
         // three identical consecutive blocks (sentence-level repetition that
-        // char/pair runs cannot see).
-        let mut tail: Vec<u8> = Vec::with_capacity(700);
+        // char/pair runs cannot see). The tail must hold 3 periods at the
+        // MAX_PERIOD cap, or long-line loops become invisible.
+        let mut tail: Vec<u8> = Vec::with_capacity(3 * Self::MAX_PERIOD + 64);
         let mut since_scan = 0usize;
         let mut degenerate = false;
         let mut usage = (0u64, 0u64, 0u64);
@@ -191,8 +192,8 @@ impl Client {
                         }
                     }
                     tail.extend_from_slice(delta.as_bytes());
-                    if tail.len() > 640 {
-                        tail.drain(..tail.len() - 640);
+                    if tail.len() > 3 * Self::MAX_PERIOD {
+                        tail.drain(..tail.len() - 3 * Self::MAX_PERIOD);
                     }
                     since_scan += delta.len();
                     if since_scan >= 48 {
@@ -219,13 +220,18 @@ impl Client {
         })
     }
 
+    /// Longest repeated block the loop guard can see. Sized for a full
+    /// command line: models loop on ~200-byte one-liner pipelines verbatim,
+    /// which mid-stream exec turns into repeated real work.
+    const MAX_PERIOD: usize = 640;
+
     /// Sentence-level repetition: the tail ends with three IDENTICAL
-    /// consecutive blocks of 20-150 bytes. Blocks of a single repeated
+    /// consecutive blocks of 20-MAX_PERIOD bytes. Blocks of a single repeated
     /// character are the run-guard's job (and legit as ASCII art), so a
     /// phrase must have some variety (>=5 distinct bytes) to count.
     fn phrase_loop(tail: &[u8]) -> bool {
         let n = tail.len();
-        for p in 20..=150usize {
+        for p in 20..=Self::MAX_PERIOD {
             if n < 3 * p {
                 break;
             }

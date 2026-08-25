@@ -502,6 +502,22 @@ fn phrase_loops_are_cut_like_char_spam() {
 }
 
 #[test]
+fn long_line_loops_are_cut() {
+    // The real-world failure: a ~190-byte command line repeated verbatim —
+    // longer than a sentence, so it needs the wide period cap. Prose here
+    // (not a live X) so the mock run stays hermetic; the guard sees raw bytes
+    // either way.
+    let line = "get child item over the temp directory recursively with silent errors piped to measure object length sum piped to select object rounding the sum to gigabytes with two decimals for the report\n";
+    assert!(line.len() > 150, "test line must exceed the old period cap");
+    let spam: &'static str = Box::leak(line.repeat(8).into_boxed_str());
+    let port = mock_server(vec![spam, "D recovered\n"]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "task", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "recovered", "long-line loop was not cut");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn endless_refusal_loop_aborts() {
     // A deterministic model re-sending one refused command forever.
     let same: &'static str = "G \"wrold\" greet.txt\n";
