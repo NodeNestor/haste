@@ -51,6 +51,8 @@ fn main() {
     let mut root = std::env::current_dir().expect("cwd");
     let mut want_tui = false;
     let mut events = false;
+    let mut model_choice: Option<String> = None;
+    let mut reason_choice: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -76,6 +78,14 @@ fn main() {
                 events = true;
                 args.remove(i);
             }
+            "--model" | "-m" => {
+                model_choice = args.get(i + 1).cloned();
+                args.drain(i..(i + 2).min(args.len()));
+            }
+            "--reason" | "-r" => {
+                reason_choice = args.get(i + 1).cloned();
+                args.drain(i..(i + 2).min(args.len()));
+            }
             _ => i += 1,
         }
     }
@@ -85,6 +95,34 @@ fn main() {
             eprintln!("haste: {e}");
             std::process::exit(2);
         }
+    };
+    let cfg = match model_choice {
+        Some(name) => {
+            let mut c = (*cfg).clone();
+            match c.models.get(&name).cloned() {
+                Some(m) => {
+                    c.model = m;
+                    Arc::new(c)
+                }
+                None => {
+                    let have: Vec<&str> = c.models.keys().map(String::as_str).collect();
+                    eprintln!("haste: no [models.{name}] in config (available: {})", have.join(", "));
+                    std::process::exit(2);
+                }
+            }
+        }
+        None => cfg,
+    };
+    let cfg = match reason_choice {
+        Some(r) => {
+            if !cfg.model.reasoning.contains_key(&r) {
+                let have: Vec<&str> = cfg.model.reasoning.keys().map(String::as_str).collect();
+                eprintln!("haste: no [model.reasoning.{r}] for this model (available: {})", have.join(", "));
+                std::process::exit(2);
+            }
+            Config::effective(&cfg, &None, &Some(r))
+        }
+        None => cfg,
     };
     for n in &cfg.mod_notes {
         eprintln!("haste: {n}");

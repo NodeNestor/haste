@@ -11,6 +11,10 @@ pub const OVERRIDABLE_VERBS: &str = "RGXOV";
 #[derive(Deserialize, Clone)]
 pub struct Config {
     pub model: ModelCfg,
+    /// Named alternate models: switch with /model <name> (TUI) or -m <name>
+    /// (CLI). Same shape as [model]; [model] stays the default.
+    #[serde(default)]
+    pub models: BTreeMap<String, ModelCfg>,
     #[serde(default)]
     pub context: CtxCfg,
     #[serde(default)]
@@ -129,6 +133,11 @@ pub struct ModelCfg {
     /// config, never in code.
     #[serde(default)]
     pub extra_body: Option<toml::value::Table>,
+    /// Named reasoning presets (off/low/high/dynamic — your names): each is a
+    /// body fragment merged over extra_body when selected with /reason or
+    /// --reason. The MAPPING is per provider, so it lives here, not in code.
+    #[serde(default)]
+    pub reasoning: BTreeMap<String, toml::value::Table>,
 }
 fn d_max_tokens() -> u32 {
     2048
@@ -378,6 +387,29 @@ impl Config {
             }
         }
         Ok(cfg)
+    }
+
+    /// The config a run actually uses: [models.<name>] swapped in, then the
+    /// chosen reasoning preset merged over extra_body. Both optional.
+    pub fn effective(cfg: &std::sync::Arc<Config>, model: &Option<String>, reason: &Option<String>) -> std::sync::Arc<Config> {
+        if model.is_none() && reason.is_none() {
+            return std::sync::Arc::clone(cfg);
+        }
+        let mut c = (**cfg).clone();
+        if let Some(name) = model {
+            if let Some(m) = c.models.get(name).cloned() {
+                c.model = m;
+            }
+        }
+        if let Some(r) = reason {
+            if let Some(frag) = c.model.reasoning.get(r).cloned() {
+                let eb = c.model.extra_body.get_or_insert_with(Default::default);
+                for (k, v) in frag {
+                    eb.insert(k, v);
+                }
+            }
+        }
+        std::sync::Arc::new(c)
     }
 
     pub fn api_key(&self) -> Option<String> {

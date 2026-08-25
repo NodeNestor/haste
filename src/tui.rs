@@ -43,6 +43,12 @@ struct App {
     agents: Vec<(String, String, bool)>,
     /// Sidebar: current compact plan view.
     plan: String,
+    /// Active [models.*] override (None = the [model] default); applied to
+    /// the next task's run, so a switch never disturbs a live run.
+    model_override: Option<String>,
+    model_label: String,
+    /// Active reasoning preset name (a key in the model's [model.reasoning.*]).
+    reason_override: Option<String>,
     spin: usize,
     started: Option<Instant>,
     /// One-shot background notices (/update result etc.), polled like events.
@@ -107,6 +113,9 @@ fn main_loop(cfg: &Arc<Config>, root: PathBuf, initial_task: Option<String>, out
         last_action: String::new(),
         agents: Vec::new(),
         plan: String::new(),
+        model_override: None,
+        model_label: cfg.model.model.clone(),
+        reason_override: None,
         spin: 0,
         started: None,
         notice_rx: None,
@@ -322,11 +331,11 @@ fn submit(app: &mut App, cfg: &Arc<Config>) {
     app.running = true;
     app.turn = 0;
     app.started = Some(Instant::now());
-    let cfg2 = Arc::clone(cfg);
+    let cfg2 = Config::effective(cfg, &app.model_override, &app.reason_override);
     let mut session = app
         .session
         .take()
-        .unwrap_or_else(|| Session::new(cfg, app.root.clone(), 0));
+        .unwrap_or_else(|| Session::new(&cfg2, app.root.clone(), 0));
     std::thread::spawn(move || {
         agent::run_session(
             cfg2,
@@ -350,6 +359,8 @@ fn command(app: &mut App, cfg: &Arc<Config>, cmd: &str) {
                 "/new         fresh session in the same workspace",
                 "/mods        show loaded mods",
                 "/stream      toggle the live stream pane (F2)",
+                "/model [name]  switch model (from [models.*]; 'default' resets)",
+                "/reason [name] switch reasoning preset (from [model.reasoning.*])",
                 "/update      self-update from the latest release",
                 "/q           quit  ·  Esc stops a run  ·  type mid-run to steer",
             ] {
@@ -380,6 +391,51 @@ fn command(app: &mut App, cfg: &Arc<Config>, cmd: &str) {
             app.agents.clear();
             app.ctx_tokens = 0;
             app.push(DIM, "  (fresh session)".into());
+        }
+        "model" => {
+            if rest.is_empty() {
+                app.push(DIM, format!("  model: {}", app.model_label));
+                if cfg.models.is_empty() {
+                    app.push(DIM, "  no [models.*] alternates in config — add one to switch".into());
+                } else {
+                    let names: Vec<&str> = cfg.models.keys().map(String::as_str).collect();
+                    app.push(DIM, format!("  alternates: {} · /model <name> switches, /model default resets", names.join(", ")));
+                }
+            } else if rest == "default" {
+                app.model_override = None;
+                app.model_label = cfg.model.model.clone();
+                app.push(DIM, format!("  model → {} (default; applies from the next task)", app.model_label));
+            } else if let Some(m) = cfg.models.get(rest) {
+                app.model_override = Some(rest.to_string());
+                app.model_label = m.model.clone();
+                app.push(DIM, format!("  model → {} @ {} (applies from the next task)", m.model, m.base_url));
+            } else {
+                let names: Vec<&str> = cfg.models.keys().map(String::as_str).collect();
+                app.push(DIM, format!("  no [models.{rest}] — available: {}", names.join(", ")));
+            }
+        }
+        "reason" => {
+            // The presets are whatever the ACTIVE model's [model.reasoning.*]
+            // declares — off/low/high/xhigh/dynamic are conventions, the
+            // provider mapping lives in config.
+            let active = Config::effective(cfg, &app.model_override, &None);
+            let names: Vec<&str> = active.model.reasoning.keys().map(String::as_str).collect();
+            if rest.is_empty() {
+                app.push(DIM, format!("  reasoning: {}", app.reason_override.as_deref().unwrap_or("(default)")));
+                if names.is_empty() {
+                    app.push(DIM, "  no [model.reasoning.*] presets for this model — define them in config".into());
+                } else {
+                    app.push(DIM, format!("  presets: {} · /reason <name> switches, /reason default resets", names.join(", ")));
+                }
+            } else if rest == "default" {
+                app.reason_override = None;
+                app.push(DIM, "  reasoning → (default; applies from the next task)".into());
+            } else if active.model.reasoning.contains_key(rest) {
+                app.reason_override = Some(rest.to_string());
+                app.push(DIM, format!("  reasoning → {rest} (applies from the next task)"));
+            } else {
+                app.push(DIM, format!("  no reasoning preset '{rest}' — available: {}", names.join(", ")));
+            }
         }
         "mods" => {
             if cfg.mod_notes.is_empty() {
@@ -590,10 +646,12 @@ fn draw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     } else {
         "idle".into()
     };
+    let reason = app.reason_override.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
+    let model = format!(" · {}{}", app.model_label, reason);
     let ctx = if app.ctx_tokens > 0 {
-        format!(" · ctx {:.1}k", app.ctx_tokens as f64 / 1000.0)
+        format!("{model} · ctx {:.1}k", app.ctx_tokens as f64 / 1000.0)
     } else {
-        String::new()
+        model
     };
     let status = format!(
         " {} · {}{} · stream {} ",

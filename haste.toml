@@ -90,3 +90,19 @@ system = "You fix exactly the issue in the task. Verify with C/T before D."
 tools = "REIGNXTCV"
 max_turns = 0
 budget_tokens = 10000
+
+# ---- alternate models: /model <name> (TUI) or -m <name> (CLI) switches ----
+# [models.cerebras]
+# base_url = "https://api.cerebras.ai/v1"
+# model = "zai-glm-4.7"
+# api_key_env = "CEREBRAS_API_KEY"
+# prefix_cache = true
+
+# ---- reasoning presets: /reason <name> (TUI) or -r <name> (CLI) ----
+# Named body fragments merged over extra_body — the provider mapping is yours.
+# [model.reasoning.off]
+# chat_template_kwargs = { enable_thinking = false }
+# [model.reasoning.high]
+# chat_template_kwargs = { enable_thinking = true }
+# [models.cerebras.reasoning.xhigh]     # per alternate model too
+# reasoning_effort = "high"
