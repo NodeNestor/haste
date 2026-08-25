@@ -10,7 +10,7 @@
 base_url = "http://127.0.0.1:8000/v1"    # any OpenAI-compatible /chat/completions endpoint
 model = "my-model"                        # model name sent in the request body
 # api_key_env = "CEREBRAS_API_KEY"        # env VAR NAME holding the bearer key (never the key itself)
-max_tokens = 8192                         # big files must fit in one payload; cuts trigger rewrite loops
+max_tokens = 32768                        # per-request output cap; the length guard recovers a clipped file, but not needing to is faster
 temperature = 0.7                         # Qwen official: DO NOT use greedy (temp 0) — quality degradation + repetition; 0.7/top_p 0.8 is their recommendation
 prefix_cache = true                       # provider has a token-prefix cache (llama.cpp/vLLM: yes; Cerebras: yes on supported models — automatic, exact-prefix, but cached tokens still bill at FULL input rate, so keep compact_phase_tokens LOW there)
 
@@ -99,7 +99,7 @@ budget_tokens = 10000
 # [models.fast]
 # base_url = "http://127.0.0.1:8001/v1"
 # model = "my-model-int4"
-# max_tokens = 8192
+# max_tokens = 32768
 # temperature = 0.7
 # prefix_cache = true
 

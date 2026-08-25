@@ -145,7 +145,7 @@ fn d_temperature() -> f32 {
     -1.0
 }
 fn d_max_tokens() -> u32 {
-    2048
+    8192 // big files must fit in one payload; cuts trigger rewrite loops
 }
 
 #[derive(Deserialize, Clone)]
@@ -337,7 +337,7 @@ model = "default"
 # model = "qwen/qwen3.5-coder"
 # api_key_env = "OPENROUTER_API_KEY"
 
-max_tokens = 8192
+max_tokens = 32768
 temperature = 0.7
 prefix_cache = true      # provider caches prompt prefixes (vLLM/llama.cpp/Cerebras: yes)
 
