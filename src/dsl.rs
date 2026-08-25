@@ -34,6 +34,9 @@ enum Pending {
     Edit { target: String, a: usize, b: usize },
     Insert { target: String, after: usize },
     New { path: String },
+    /// `X <<`: a multi-line script body — models reach for heredocs
+    /// constantly, and eating the body as prose caused real error loops.
+    Exec,
 }
 
 /// Feed streamed model output in arbitrary chunks; complete commands come out
@@ -149,7 +152,9 @@ impl Lexer {
                 }
             }
             'X' => {
-                if !rest.is_empty() {
+                if rest == "<<" {
+                    self.pending = Some((Pending::Exec, Vec::new()));
+                } else if !rest.is_empty() {
                     out.push(Cmd::Exec { line: rest.to_string() });
                 }
             }
@@ -199,6 +204,7 @@ fn close_payload(p: Pending, body: Vec<String>) -> Cmd {
         Pending::Edit { target, a, b } => Cmd::Edit { target, a, b, body },
         Pending::Insert { target, after } => Cmd::Insert { target, after, body },
         Pending::New { path } => Cmd::New { path, body },
+        Pending::Exec => Cmd::Exec { line: body },
     }
 }
 

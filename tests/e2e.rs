@@ -986,3 +986,29 @@ effort = "xhigh"
     assert_eq!(c2.model.model, "other");
     assert_eq!(c2.model.extra_body.as_ref().unwrap().get("effort").and_then(|v| v.as_str()), Some("xhigh"));
 }
+
+#[test]
+fn multiline_x_heredoc_runs_as_one_script() {
+    // Models reach for heredocs constantly; X << must capture the whole
+    // script instead of the body being eaten as prose.
+    let port = mock_server(vec![
+        "X <<\n$a = 'multi'\n$b = 'line'\nWrite-Output \"$a-$b\"\n.\nD scripted\n",
+    ]);
+    let root = temp_repo();
+    let toml = format!(
+        "[model]\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"mock\"\n[context]\nbootstrap = false\n[exec]\nshell = \"{}\"\n",
+        if cfg!(windows) { "powershell" } else { "sh" }
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let rep = haste::agent::run_session(Arc::clone(&cfg), &mut session, "script", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "scripted");
+    if cfg!(windows) {
+        assert!(
+            session.ledger.entries.iter().any(|e| e.text.contains("multi-line")),
+            "script output missing: {:?}",
+            session.ledger.entries.iter().map(|e| e.text.chars().take(40).collect::<String>()).collect::<Vec<_>>()
+        );
+    }
+    let _ = std::fs::remove_dir_all(root);
+}

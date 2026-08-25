@@ -455,7 +455,7 @@ pub fn run_session(
         // never sees. Tell the model exactly what it lost.
         if lexer.dropped > 0 && !prose_rescued {
             tc.note(format!(
-                "({} plain-prose line{} DISCARDED — anything meant for the user must be inside one S line or the D message)",
+                "({} plain-prose line{} DISCARDED. Text for the user goes in one S line or the D message; a multi-line SCRIPT goes in `X <<` … `.`. When resending, resend ONLY the lost lines — commands this turn already ran)",
                 lexer.dropped,
                 if lexer.dropped == 1 { " was" } else { "s were" }
             ));
@@ -767,7 +767,10 @@ fn action_of(cmd: &Cmd) -> String {
             Some(t) => format!("G \"{pat}\" {t}"),
             None => format!("G \"{pat}\""),
         },
-        Cmd::Exec { line } => format!("X {line}"),
+        Cmd::Exec { line } => match line.lines().count() {
+            0 | 1 => format!("X {line}"),
+            n => format!("X {} …(+{} script lines)", line.lines().next().unwrap_or(""), n - 1),
+        },
         Cmd::Custom { verb, args } => format!("{verb} {args}"),
         Cmd::Agent { profile, task } => format!("A {profile} {task}"),
         Cmd::Done { .. } => "D".into(),
@@ -1181,7 +1184,7 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     if allow('N') { s.push_str("N <path>            create file; content follows, end \".\"\n"); }
     if allow('G') { s.push_str("G <regex> [id|path] search files, results as #id:line:text\n"); }
     if allow('O') { s.push_str("O [id|path|dir]     outline: signatures with line numbers, bodies elided — orient cheaply BEFORE reading\n"); }
-    if allow('X') { s.push_str("X <command>         run shell command in the repo root\n"); }
+    if allow('X') { s.push_str("X <command>         run ONE shell command line in the repo root. Multi-line script: `X <<` alone, then the script lines, end with a line that is only \".\"\n"); }
     if allow('V') { s.push_str("V <id|path>         view an image file (png/jpg/webp/gif) — you SEE it in the next turn\n"); }
     if allow('A') && !cfg.profile.is_empty() {
         let names: Vec<&str> = cfg.profile.keys().map(String::as_str).collect();
