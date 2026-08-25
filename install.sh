@@ -16,6 +16,15 @@ url=$(curl -fsSL -H "User-Agent: haste-install" "https://api.github.com/repos/$r
 curl -fsSL -H "User-Agent: haste-install" -o "$dir/haste" "$url"
 chmod +x "$dir/haste"
 echo "haste installed to $dir/haste"
+# swift, the fleet manager, ships beside haste (best-effort)
+sasset=$(echo "$asset" | sed 's/^haste/swift/')
+surl=$(curl -fsSL -H "User-Agent: haste-install" "https://api.github.com/repos/$repo/releases/latest" \
+  | grep -o "\"browser_download_url\": *\"[^\"]*$sasset\"" | grep -o "https://[^\"]*") || true
+if [ -n "$surl" ]; then
+  curl -fsSL -H "User-Agent: haste-install" -o "$dir/swift" "$surl"
+  chmod +x "$dir/swift"
+  echo "swift installed to $dir/swift (heads-up: may shadow Apple's swift on macOS PATH)"
+fi
 case ":$PATH:" in
   *":$dir:"*) ;;
   *) echo "add $dir to your PATH" ;;

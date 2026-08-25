@@ -12,6 +12,14 @@ $exe = Join-Path $dir "haste.exe"
 if (Test-Path $exe) { Move-Item $exe "$exe.old" -Force }
 Invoke-WebRequest $url -OutFile $exe -Headers @{ "User-Agent" = "haste-install" }
 Remove-Item "$exe.old" -Force -ErrorAction SilentlyContinue
+# swift, the fleet manager, ships beside haste (best-effort: older releases lack it)
+$surl = ($rel.assets | Where-Object name -eq "swift-windows-x86_64.exe").browser_download_url
+if ($surl) {
+    $sexe = Join-Path $dir "swift.exe"
+    if (Test-Path $sexe) { Move-Item $sexe "$sexe.old" -Force }
+    Invoke-WebRequest $surl -OutFile $sexe -Headers @{ "User-Agent" = "haste-install" }
+    Remove-Item "$sexe.old" -Force -ErrorAction SilentlyContinue
+}
 $path = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($path -notlike "*$dir*") {
     [Environment]::SetEnvironmentVariable("Path", "$path;$dir", "User")

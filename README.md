@@ -114,22 +114,39 @@ a hosted service requires a commercial license from NodeNestor.
 
 ## swift — the fleet layer
 
-The workspace ships a second binary: **swift**, a hyper-light fleet manager.
-A `fleet.toml` declares named agents — each with its own workspace, haste
-config, and optional profile. **Persistent** agents keep one session across
-tasks (memory, interned files, sealed history — a follow-up task costs tens
-of tokens, not a re-orientation); one-shot agents start clean. Tasks are text
-files dropped in `<root>/.swift/inbox/` (or `swift send <agent> <task>`);
-events from all agents multiplex into one log. Polling mods (`poll = true`
-exempts a tool from the loop breaker) let a persistent agent watch a mailbox
-forever on its own.
+The install scripts also drop **swift**, the hyper-light fleet manager
+(same release, second binary). A fleet is one TOML file of named agents:
 
 ```toml
+# fleet.toml
 [agent.coder]
-root = "C:/work/api"
-persistent = true
+root = "C:/work/api"          # the agent's workspace; its own haste.toml applies
+persistent = true             # ONE session across tasks: memory, warm prefix —
+                              # a follow-up task costs tens of tokens
 
-[agent.scout]
-root = "C:/work/research"
-persistent = false
+[agent.issues]
+root = "C:/work/api"
+persistent = false            # fresh session per task
+parallel = 2                  # chew several tasks at once (one-shot only)
+source = "gh issue list --label swift --json number,title -q '.[] | \"fix issue #\\(.number): \\(.title)\"'"
+interval_s = 120              # every NEW source line (never seen before) = one task
+
+[agent.watcher]
+root = "C:/work/mail"
+persistent = true             # pair with a `poll = true` mod verb to watch a
+                              # mailbox forever — the loop breaker leaves polls alone
 ```
+
+```
+swift fleet.toml              # the fleet TUI: overview page + one page per agent
+swift fleet.toml --headless   # multiplexed log to stdout instead
+swift send coder "<task>"     # queue work from outside (fleet.toml in cwd)
+```
+
+In the TUI, Tab/arrows switch pages; typing on an agent's page sends to that
+agent — mid-run it lands in the live session as a user message. Agents know
+their peers and can do the same themselves (`X swift send scout <text>`), so
+handoffs, steering, and task pickup are all one channel. Tasks are plain text
+files in `<root>/.swift/inbox/`; every agent's history lands in
+`<root>/.swift/log`. The fleet dies with the manager (session memory does not
+yet survive a restart).
