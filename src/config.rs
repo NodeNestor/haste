@@ -123,7 +123,9 @@ pub struct ModelCfg {
     pub api_key_env: Option<String>,
     #[serde(default = "d_max_tokens")]
     pub max_tokens: u32,
-    #[serde(default)]
+    /// Omitted = don't send the field (provider's own default). Explicit 0.0
+    /// = greedy. Negative also means "don't send" (providers that reject it).
+    #[serde(default = "d_temperature")]
     pub temperature: f32,
     /// Provider has a token-prefix cache (llama.cpp, vLLM). Selects append mode defaults.
     #[serde(default)]
@@ -138,6 +140,9 @@ pub struct ModelCfg {
     /// --effort. The MAPPING is per provider, so it lives here, not in code.
     #[serde(default)]
     pub effort: BTreeMap<String, toml::value::Table>,
+}
+fn d_temperature() -> f32 {
+    -1.0
 }
 fn d_max_tokens() -> u32 {
     2048
