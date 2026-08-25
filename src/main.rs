@@ -12,7 +12,7 @@ fn main() {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "haste — micro agent harness for wafer-speed inference\n\n\
-             usage: haste [-c config.toml] [-p profile] [-C root] [--tui] [task...]\n       haste init | update\n\n\
+             usage: haste [-c config.toml] [-p profile] [-m model] [-e effort] [-C root] [--tui] [task...]\n       haste init | update\n\n\
              With no task, opens the TUI in the current directory.\n\
              Config lookup: -c, ./haste.toml, ~/.haste.toml, built-in default."
         );
@@ -52,7 +52,7 @@ fn main() {
     let mut want_tui = false;
     let mut events = false;
     let mut model_choice: Option<String> = None;
-    let mut reason_choice: Option<String> = None;
+    let mut effort_choice: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -82,8 +82,8 @@ fn main() {
                 model_choice = args.get(i + 1).cloned();
                 args.drain(i..(i + 2).min(args.len()));
             }
-            "--reason" | "-r" => {
-                reason_choice = args.get(i + 1).cloned();
+            "--effort" | "-e" => {
+                effort_choice = args.get(i + 1).cloned();
                 args.drain(i..(i + 2).min(args.len()));
             }
             _ => i += 1,
@@ -113,11 +113,11 @@ fn main() {
         }
         None => cfg,
     };
-    let cfg = match reason_choice {
+    let cfg = match effort_choice {
         Some(r) => {
-            if !cfg.model.reasoning.contains_key(&r) {
-                let have: Vec<&str> = cfg.model.reasoning.keys().map(String::as_str).collect();
-                eprintln!("haste: no [model.reasoning.{r}] for this model (available: {})", have.join(", "));
+            if !cfg.model.effort.contains_key(&r) {
+                let have: Vec<&str> = cfg.model.effort.keys().map(String::as_str).collect();
+                eprintln!("haste: no [model.effort.{r}] for this model (available: {})", have.join(", "));
                 std::process::exit(2);
             }
             Config::effective(&cfg, &None, &Some(r))

@@ -15,7 +15,10 @@ where the model stops being the bottleneck and wall-clock is
   (tool time hides inside generation time), a persistent shell daemon (~2ms per command
   vs ~150ms of shell startup), background test runs. Overhead is a CI assertion.
 
-~4.9k LOC, 7 deps, one self-contained binary.
+~4.9k LOC, 7 deps, one self-contained binary. And the token-lightness cuts the
+other way too: a small local model gets fewer tokens to read, fewer chances to
+get lost, and fewer to generate — a 9B on a consumer GPU drives haste as
+happily as a wafer does.
 
 ![a real haste session: live subagent, plan pane, verify gates](docs/session.png)
 
@@ -43,7 +46,10 @@ haste --tui <task...>            # TUI, starts working immediately
 haste [-p profile] [-C root] <task...>    # headless one-shot
 ```
 
-Any OpenAI-compatible endpoint works. The TUI is a chat: type mid-run to steer, Esc
+Any OpenAI-compatible endpoint works — `[models.*]` declares alternates
+(`/model` or `-m` switches) and `[model.effort.*]` declares reasoning-effort
+presets as request-body fragments (`/effort` or `-e`; off/low/xhigh/dynamic
+are your names, the provider mapping stays in your config). The TUI is a chat: type mid-run to steer, Esc
 stops, `/help` lists commands, a sidebar shows live subagents and the plan, and the
 status bar shows the real billed context size every turn.
 

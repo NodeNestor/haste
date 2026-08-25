@@ -1,6 +1,6 @@
 [package]
 name = "swift"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "swift - hyper-light fleet manager for haste agents: persistent and one-shot agents fed by drop-file inboxes."
 license-file = "../LICENSE"

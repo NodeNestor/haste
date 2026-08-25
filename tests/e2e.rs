@@ -959,29 +959,29 @@ fn d_with_discarded_prose_block_is_bounced_until_resent() {
 }
 
 #[test]
-fn model_alternates_and_reasoning_presets_apply() {
+fn model_alternates_and_effort_presets_apply() {
     let toml = r#"
 [model]
 base_url = "http://localhost:1/v1"
 model = "base"
 [model.extra_body]
 top_p = 0.8
-[model.reasoning.high]
+[model.effort.high]
 reasoning_effort = "high"
 [models.alt]
 base_url = "http://localhost:2/v1"
 model = "other"
-[models.alt.reasoning.xhigh]
+[models.alt.effort.xhigh]
 effort = "xhigh"
 "#;
     let cfg = Arc::new(toml::from_str::<Config>(toml).unwrap());
-    // reasoning merges over extra_body on the default model
+    // effort merges over extra_body on the default model
     let c = Config::effective(&cfg, &None, &Some("high".into()));
     assert_eq!(c.model.model, "base");
     let eb = c.model.extra_body.as_ref().unwrap();
     assert_eq!(eb.get("reasoning_effort").and_then(|v| v.as_str()), Some("high"));
     assert!(eb.contains_key("top_p"), "existing extra_body keys must survive");
-    // model swap brings its own reasoning table
+    // model swap brings its own effort table
     let c2 = Config::effective(&cfg, &Some("alt".into()), &Some("xhigh".into()));
     assert_eq!(c2.model.model, "other");
     assert_eq!(c2.model.extra_body.as_ref().unwrap().get("effort").and_then(|v| v.as_str()), Some("xhigh"));

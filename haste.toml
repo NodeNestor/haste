@@ -17,7 +17,7 @@ top_p = 0.8                               # Qwen-recommended sampling
 repetition_penalty = 1.05
 
 [model.extra_body.chat_template_kwargs]
-enable_thinking = false                   # no reasoning — iterate, don't deliberate
+enable_thinking = false                   # no effort — iterate, don't deliberate
 
 [prompt]
 # system = "You are haste, ..."           # replaces the built-in identity line (command reference stays generated)
@@ -98,11 +98,11 @@ budget_tokens = 10000
 # api_key_env = "CEREBRAS_API_KEY"
 # prefix_cache = true
 
-# ---- reasoning presets: /reason <name> (TUI) or -r <name> (CLI) ----
+# ---- effort presets: /effort <name> (TUI) or -e <name> (CLI) ----
 # Named body fragments merged over extra_body — the provider mapping is yours.
-# [model.reasoning.off]
+# [model.effort.off]
 # chat_template_kwargs = { enable_thinking = false }
-# [model.reasoning.high]
+# [model.effort.high]
 # chat_template_kwargs = { enable_thinking = true }
-# [models.cerebras.reasoning.xhigh]     # per alternate model too
+# [models.cerebras.effort.xhigh]     # per alternate model too
 # reasoning_effort = "high"
