@@ -63,15 +63,10 @@ impl Renderer {
 
     /// Seal history behind a model-written summary. Render-layer only — the
     /// ledger is never touched (compression is a rendering decision). Pins,
-    /// the most recent Task entry, and the last `keep_last` entries survive.
+    /// EVERY Task entry, and the last `keep_last` entries survive.
     pub fn seal_summary(&mut self, ledger: &Ledger, keep_last: usize, summary: String) {
         let n = ledger.entries.len();
         let keep_from = n.saturating_sub(keep_last).max(self.sealed_upto);
-        let last_task = ledger
-            .entries
-            .iter()
-            .rposition(|e| e.kind == Kind::Task)
-            .unwrap_or(usize::MAX);
         // The new briefing was written while SEEING earlier summaries, so it
         // subsumes them: sweep from 0, replacing prior summary blocks instead
         // of letting them accumulate.
@@ -79,7 +74,11 @@ impl Renderer {
         for i in 0..keep_from {
             match ledger.entries[i].kind {
                 Kind::Pin => continue,
-                Kind::Task if i == last_task => continue,
+                // Every Task survives, not just the newest: mid-run steering
+                // lands as a Task, so sealing all but the last one silently
+                // expires standing constraints ("never touch the tests") the
+                // moment a newer instruction arrives.
+                Kind::Task => continue,
                 _ => {
                     if placed {
                         self.overrides.insert(i, String::new());

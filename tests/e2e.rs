@@ -45,6 +45,17 @@ fn mock_server(scripts: Vec<&'static str>) -> u16 {
             }
             let msg = scripts.get(i).copied().unwrap_or("D out of script\n");
             i += 1;
+            // "USAGE:p,c:" prefix overrides the reported token usage, so a test
+            // can drive decisions made from REAL provider counts (the seal
+            // shrink guard). Unprefixed scripts keep the 100/7 default.
+            let (msg, usage) = match msg.strip_prefix("USAGE:") {
+                Some(rest) => {
+                    let (nums, m) = rest.split_once(':').expect("USAGE:p,c:msg");
+                    let (p, c) = nums.split_once(',').expect("USAGE:p,c:msg");
+                    (m, (p.parse::<u64>().unwrap(), c.parse::<u64>().unwrap()))
+                }
+                None => (msg, (100u64, 7u64)),
+            };
             // "LENGTH:" prefix simulates a max_tokens-guillotined stream.
             let (msg, fr) = match msg.strip_prefix("LENGTH:") {
                 Some(m) => (m, "length"),
@@ -62,7 +73,7 @@ fn mock_server(scripts: Vec<&'static str>) -> u16 {
             }
             let fin = serde_json::json!({
                 "choices":[{"delta":{}, "finish_reason": fr}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 7,
+                "usage": {"prompt_tokens": usage.0, "completion_tokens": usage.1,
                           "prompt_tokens_details": {"cached_tokens": 80}}
             });
             resp.push_str(&format!("data: {fin}\n\n"));
@@ -1026,5 +1037,171 @@ fn multiline_x_heredoc_runs_as_one_script() {
             session.ledger.entries.iter().map(|e| e.text.chars().take(40).collect::<String>()).collect::<Vec<_>>()
         );
     }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn every_task_survives_a_seal_not_just_the_latest() {
+    // Mid-run steering lands as a Task entry. If only the newest Task survives
+    // compaction, a standing constraint given early ("never touch config.py")
+    // silently expires the moment a newer instruction arrives.
+    let port = mock_server(vec![
+        "X echo a\nX echo b\nX echo c\n",
+        "D one — this deliberately verbose completion note pads the ledger well past the ten-token budget so run two must compact first\n",
+        "COMPACT BRIEF: phase one done.\n", // the seal call
+        "D two\n",
+    ]);
+    let root = temp_repo();
+    let toml = format!(
+        r#"
+[model]
+base_url = "http://127.0.0.1:{port}/v1"
+model = "mock"
+
+[context]
+mode = "append"
+budget_tokens = 10
+bootstrap = false
+compact = "model"
+compact_keep_last = 2
+"#
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let _ = haste::agent::run_session(
+        Arc::clone(&cfg),
+        &mut session,
+        "NEVER EDIT CONFIG.PY",
+        None,
+        0,
+        haste::agent::Ctl::default(),
+    );
+    let r2 = haste::agent::run_session(
+        Arc::clone(&cfg),
+        &mut session,
+        "now add a feature",
+        None,
+        0,
+        haste::agent::Ctl::default(),
+    );
+    assert_eq!(r2.final_msg, "two");
+    assert_eq!(r2.seals, 1, "a seal must have happened for this test to mean anything");
+    let mut cfg2 = cfg.context.clone();
+    cfg2.budget_tokens = 100_000;
+    let doc = session.renderer.render(&session.ledger, &cfg2, 99);
+    assert!(doc.contains("[history compressed]"), "expected a sealed doc:\n{doc}");
+    assert!(
+        doc.contains("NEVER EDIT CONFIG.PY"),
+        "the earlier task's standing constraint was swept by the seal:\n{doc}"
+    );
+    assert!(doc.contains("now add a feature"), "{doc}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_briefing_that_does_not_shrink_the_doc_is_rejected() {
+    // The guard is measured in REAL provider tokens: completion_tokens is the
+    // briefing's exact size, prompt_tokens the doc it compresses. A seal that
+    // fails to shrink is worse than none — MIN_ENTRIES_BETWEEN_SEALS then
+    // blocks a retry — so it must fall through to structural folding.
+    let port = mock_server(vec![
+        "X echo a\nX echo b\nX echo c\n",
+        "D one — this deliberately verbose completion note pads the ledger well past the ten-token budget so run two must compact first\n",
+        // 80 * 4 > 100: the "briefing" is not a compression.
+        "USAGE:100,80:COMPACT BRIEF: this briefing is far too long to be a compression.\n",
+        "D two\n",
+    ]);
+    let root = temp_repo();
+    let toml = format!(
+        r#"
+[model]
+base_url = "http://127.0.0.1:{port}/v1"
+model = "mock"
+
+[context]
+mode = "append"
+budget_tokens = 10
+bootstrap = false
+compact = "model"
+compact_keep_last = 2
+"#
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let _ = haste::agent::run_session(
+        Arc::clone(&cfg),
+        &mut session,
+        "first task",
+        None,
+        0,
+        haste::agent::Ctl::default(),
+    );
+    let r2 = haste::agent::run_session(
+        Arc::clone(&cfg),
+        &mut session,
+        "second task",
+        None,
+        0,
+        haste::agent::Ctl::default(),
+    );
+    assert_eq!(r2.final_msg, "two");
+    assert_eq!(r2.seals, 0, "a non-shrinking briefing must not count as a seal");
+    let mut cfg2 = cfg.context.clone();
+    cfg2.budget_tokens = 100_000;
+    let doc = session.renderer.render(&session.ledger, &cfg2, 99);
+    assert!(
+        !doc.contains("COMPACT BRIEF"),
+        "the rejected briefing was sealed in anyway:\n{doc}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_degenerate_briefing_is_never_sealed_in() {
+    // client::stream cuts char-run spam mid-stream, but only AFTER earlier
+    // chunks reached on_delta — so the summary still holds a few hundred spam
+    // characters, and clean_final does not strip repetition. If that were
+    // sealed, the whole history view would become "!!!!…".
+    let port = mock_server(vec![
+        "X echo a
+X echo b
+X echo c
+",
+        "D one — this deliberately verbose completion note pads the ledger well past the ten-token budget so run two must compact first
+",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+", // the seal call collapses
+        "D two
+",
+    ]);
+    let root = temp_repo();
+    let toml = format!(
+        r#"
+[model]
+base_url = "http://127.0.0.1:{port}/v1"
+model = "mock"
+
+[context]
+mode = "append"
+budget_tokens = 10
+bootstrap = false
+compact = "model"
+compact_keep_last = 2
+"#
+    );
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&toml).unwrap());
+    let mut session = haste::agent::Session::new(&cfg, root.clone(), 0);
+    let _ = haste::agent::run_session(Arc::clone(&cfg), &mut session, "first task", None, 0, haste::agent::Ctl::default());
+    let r2 = haste::agent::run_session(Arc::clone(&cfg), &mut session, "second task", None, 0, haste::agent::Ctl::default());
+    assert_eq!(r2.final_msg, "two");
+    assert_eq!(r2.seals, 0, "a degenerate briefing must not count as a seal");
+    let mut cfg2 = cfg.context.clone();
+    cfg2.budget_tokens = 100_000;
+    let doc = session.renderer.render(&session.ledger, &cfg2, 99);
+    assert!(
+        !doc.contains("!!!!!!!!!!"),
+        "spam from a cut generation was sealed into the history view:
+{doc}"
+    );
     let _ = std::fs::remove_dir_all(root);
 }

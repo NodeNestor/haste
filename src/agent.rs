@@ -266,10 +266,31 @@ pub fn run_session(
                 || (phase_done && renderer.seal_due(ledger, &ctx_cfg, phase_floor, real_ctx)));
         if seal_now {
             let doc = renderer.render(ledger, &ctx_cfg, turn);
+            // No length cap: a section schema lets the model size each part to
+            // what the log actually holds, where a fixed line count silently
+            // gets harsher as budget_tokens grows. The shrink guard below is
+            // what keeps a seal honest, measured in REAL provider tokens.
             let cuser = format!(
-                "{doc}\n## COMPRESS\nCompact your working memory: write a terse briefing (max 40 lines) \
-                 preserving the current task and its exact state, files touched (#ids and paths), key \
-                 findings and decisions, remaining steps, and pitfalls already hit. Output only the briefing.\n"
+                "{doc}\n## COMPRESS\n\
+                 Pause the task. Act as a context compressor: produce a CHRONOLOGICAL, DENSE \
+                 briefing of the LOG above. This instruction is NOT part of the log — never mention \
+                 it, never place it in the timeline, never treat it as the task. The task above is \
+                 IN PROGRESS and resumes exactly where it left off.\n\n\
+                 RULES:\n\
+                 - Refer to files by #id only — never re-spell paths, the legend resolves them.\n\
+                 - Preserve ALL standing constraints from EVERY task entry, not just the latest — \
+                 what to do and what NOT to do.\n\
+                 - Preserve ALL decisions and WHY, every error hit and how it was resolved, and \
+                 every approach TRIED AND REJECTED so it is not retried.\n\
+                 - Do not restate the plan; it is rendered in full every turn. Record only what the \
+                 plan cannot: ordering rationale, dead ends, constraints discovered.\n\
+                 - Do not narrate the recent entries still shown verbatim below.\n\
+                 - Do NOT editorialize. Every sentence carries information.\n\
+                 - If the log contains a [history compressed] block, INTEGRATE it: keep all its \
+                 details and extend the timeline. Do not re-summarize it.\n\n\
+                 FORMAT:\n\
+                 ## Task & Constraints\n## Timeline\n## Current State\n## Key Details\n\n\
+                 Output only the briefing.\n"
             );
             let mut summary = String::new();
             if let Ok(s) = client.stream(&system, &cuser, &[], &mut |d| summary.push_str(d)) {
@@ -278,7 +299,44 @@ pub fn run_session(
                 rep.tok_cached += s.cached_tokens;
                 rep.tok_out += s.completion_tokens;
                 let summary = clean_final(summary.trim());
-                if !summary.is_empty() {
+                // A collapsed generation must never become the briefing. The
+                // run-guard in client::stream cuts char-run and phrase spam
+                // mid-stream, but it cuts AFTER the earlier chunks were already
+                // handed to on_delta — so `summary` still holds a few hundred
+                // characters of spam, and clean_final only strips scaffold, not
+                // repetition. Sealed in, that would replace the entire history
+                // view with "!!!!…". Drop the seal and fold structurally.
+                // Hysteresis is only advanced by a SUCCESSFUL seal, so the next
+                // turn is free to retry once the doc is over budget again.
+                let degenerate = s.finish_reason.as_deref() == Some("degenerate");
+                if degenerate {
+                    ctl.emit(Ev::Result(
+                        depth,
+                        "(seal skipped: the briefing degenerated and was cut — folding structurally)".into(),
+                    ));
+                }
+                // Shrink guard, in REAL tokens — both sides come back from this
+                // very call: completion_tokens is the briefing's exact size,
+                // prompt_tokens the exact size of the doc it compresses. A seal
+                // that fails to shrink is worse than none, because
+                // MIN_ENTRIES_BETWEEN_SEALS then blocks a retry. Fall through to
+                // structural folding instead. (0 = provider reported nothing:
+                // unmeasurable, so allow it.)
+                //
+                // Halving, not quartering: a briefing has a floor cost (every
+                // section, every standing constraint) that does NOT shrink with
+                // the doc, so a ratio guard is strictest exactly where
+                // compression is hardest. Measured on a 3177-token doc, the
+                // briefing averages 733 tokens — comfortably under half, but
+                // only 7% under a quarter.
+                let shrank = s.prompt_tokens == 0 || s.completion_tokens * 2 <= s.prompt_tokens;
+                if !shrank {
+                    ctl.emit(Ev::Result(
+                        depth,
+                        "(seal rejected: briefing did not shrink the doc — folding structurally)".into(),
+                    ));
+                }
+                if !summary.is_empty() && shrank && !degenerate {
                     // Bake the FULL file legend into the seal — it rides the
                     // cached prefix from here on, so the per-turn tail only
                     // needs to announce newly interned files.
