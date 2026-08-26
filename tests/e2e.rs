@@ -413,15 +413,22 @@ fn lying_about_done_gets_reverted_by_verify() {
 }
 
 #[test]
-fn solo_say_hands_the_mic_back() {
-    // A clarification question with no work must END the run, not loop.
-    let port = mock_server(vec!["S what would you like me to do?\n"]);
+fn a_question_needs_d_to_hand_the_mic_back() {
+    // Contract: S NEVER ends the run. The harness used to guess from the prose
+    // whether a talk-only turn meant "your turn" or "still working" — now the
+    // model says which by choosing the verb, so a question ends with D.
+    let port = mock_server(vec![
+        "S what would you like me to do?
+",
+        "D what would you like me to do?
+",
+    ]);
     let root = temp_repo();
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "wasu", None, 0, haste::agent::Ctl::default());
     assert_eq!(rep.final_msg, "what would you like me to do?");
-    assert_eq!(rep.turns, 1, "solo S must not loop");
-    // Exact usage flows through from the provider.
-    assert_eq!((rep.tok_in, rep.tok_cached, rep.tok_out), (100, 80, 7));
+    assert_eq!(rep.turns, 2, "solo S must not end the run by itself");
+    // Exact usage flows through from the provider, summed over both requests.
+    assert_eq!((rep.tok_in, rep.tok_cached, rep.tok_out), (200, 160, 14));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -784,24 +791,49 @@ fn narration_d_is_refused_and_scaffold_is_stripped() {
     assert_eq!(rep.final_msg, "swedish only, no i18n layer");
     assert_eq!(rep.turns, 2, "narration D must not end turn 1");
     let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
-    assert!(ledger.contains("narrates work in progress"), "no refusal note");
+    assert!(ledger.contains("only repeats what you just said"), "no refusal note");
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn trailing_ellipsis_narration_does_not_end_the_run() {
-    // Solo-S "Now scanning..." announces the NEXT step — the run must
-    // continue, not hand the mic back mid-task.
+fn a_talk_only_turn_never_ends_the_run() {
+    // "Now scanning..." announces the NEXT step. This used to be decided by
+    // sniffing the prose for an ellipsis; now NO talk-only turn ends the run,
+    // whatever it says, so there is nothing left to get wrong.
     let port = mock_server(vec![
-        "S Found 11 directories. Now scanning each for project indicators...\n",
-        "X echo scanned\nD 11 projects found, 3 are Rust\n",
+        "S Found 11 directories. Now scanning each for project indicators
+",
+        "X echo scanned
+D 11 projects found, 3 are Rust
+",
     ]);
     let root = temp_repo();
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "survey", None, 0, haste::agent::Ctl::default());
     assert_eq!(rep.final_msg, "11 projects found, 3 are Rust");
-    assert_eq!(rep.turns, 2, "ellipsis solo-S must not end turn 1");
+    assert_eq!(rep.turns, 2, "a talk-only turn must not end turn 1");
     let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
-    assert!(ledger.contains("mid-task"), "no continue nudge in ledger");
+    assert!(ledger.contains("S never ends the run"), "no continue nudge in ledger");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn endless_talk_is_capped_so_the_run_cannot_spin() {
+    // S never ending the run is only safe with a runaway guard: a model that
+    // only ever talks would loop forever. Same family as MAX_EMPTY_TURNS.
+    let port = mock_server(vec![
+        "S thinking about it
+",
+        "S still thinking about it
+",
+        "S nearly there
+",
+        "S and on and on
+",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "go", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.turns, 3, "three work-free talk turns must end the run");
+    assert_eq!(rep.final_msg, "nearly there");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -896,15 +928,32 @@ fn override_tool_replaces_native_verb() {
 #[test]
 fn pure_prose_turn_is_rescued_as_say() {
     // The model writes its whole report in prose with no verbs — that must
-    // reach the user and end the run, not abort as "no commands".
+    // reach the user as an S. It no longer ENDS the run: S never does, so the
+    // model is nudged to keep going and stops with D on its own terms.
     let port = mock_server(vec![
-        "The rounding bug is fixed in tax.py.\nAll three tests pass now.\n",
+        "The rounding bug is fixed in tax.py.
+All three tests pass now.
+",
+        "D reported
+",
     ]);
     let root = temp_repo();
-    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "report", None, 0, haste::agent::Ctl::default());
-    assert!(rep.final_msg.contains("rounding bug is fixed"), "{}", rep.final_msg);
-    assert!(rep.final_msg.contains("tests pass"), "{}", rep.final_msg);
-    assert_eq!(rep.turns, 1, "prose rescue must not loop");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None, inbox: None, tag: None };
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "report", None, 0, ctl);
+    let says: Vec<String> = rx
+        .try_iter()
+        .filter_map(|e| match e {
+            haste::agent::Ev::Say(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let joined = says.join("
+");
+    assert!(joined.contains("rounding bug is fixed"), "{says:?}");
+    assert!(joined.contains("tests pass"), "{says:?}");
+    assert_eq!(rep.final_msg, "reported");
+    assert_eq!(rep.turns, 2, "prose rescue must not loop");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -964,7 +1013,7 @@ fn talk_only_turn_with_open_plan_does_not_end_the_run() {
     assert_eq!(rep.final_msg, "finished");
     assert_eq!(rep.turns, 3, "solo-S with open plan must not end turn 2");
     let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
-    assert!(ledger.contains("mid-task"), "no continue nudge");
+    assert!(ledger.contains("S never ends the run"), "no continue nudge");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1203,5 +1252,64 @@ compact_keep_last = 2
         "spam from a cut generation was sealed into the history view:
 {doc}"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn s_heredoc_delivers_a_multiline_message_without_finishing() {
+    // S was the only verb with no body, so a mid-run report had nowhere legal
+    // to go: D ends the run, one S line cannot hold a list, prose is discarded.
+    let port = mock_server(vec![
+        "S <<\nD1: 28GB used\n- alpha-data\n- db-2022\nD2: 3TB used\n.\nX echo more\n",
+        "D listed both drives\n",
+    ]);
+    let root = temp_repo();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None, inbox: None, tag: None };
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "what is on the volumes", None, 0, ctl);
+    assert_eq!(rep.final_msg, "listed both drives");
+    let says: Vec<String> = rx
+        .try_iter()
+        .filter_map(|e| match e {
+            haste::agent::Ev::Say(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let joined = says.join("\n");
+    assert!(joined.contains("alpha-data") && joined.contains("db-2022"), "multi-line S lost: {says:?}");
+    assert!(joined.contains("D2: 3TB used"), "last payload line lost: {says:?}");
+    // The run did NOT end on the S — the following command still executed.
+    assert!(rep.commands >= 2, "commands: {}", rep.commands);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn prose_after_an_s_line_is_rescued_not_discarded() {
+    // The shape that ate a real session: one S of preamble, then the actual
+    // content as markdown. Gating the rescue on "no commands at all" meant
+    // emitting nothing was rescued while a helpful one-liner first lost the
+    // whole report — the user sees an answer stop mid-sentence.
+    let port = mock_server(vec![
+        "S Found D1. Now checking D2:\nHere is the listing:\n- alpha-data\n- beta-review\n- gamma-online\n",
+        "D done\n",
+    ]);
+    let root = temp_repo();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctl = haste::agent::Ctl { sink: Some(tx), stop: None, inbox: None, tag: None };
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "what is on D1", None, 0, ctl);
+    let says: Vec<String> = rx
+        .try_iter()
+        .filter_map(|e| match e {
+            haste::agent::Ev::Say(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let joined = says.join("\n");
+    assert!(joined.contains("Now checking D2:"), "the S line itself was lost: {says:?}");
+    assert!(
+        joined.contains("alpha-data") && joined.contains("gamma-online"),
+        "prose after an S line was discarded — the user never saw the report: {says:?}"
+    );
+    assert!(rep.turns >= 1);
     let _ = std::fs::remove_dir_all(root);
 }

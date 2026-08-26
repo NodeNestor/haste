@@ -8,6 +8,7 @@
 ///   N <path>               create file, payload follows
 ///   G <regex> [id|path]    search
 ///   X <shell...>           run command
+///   S <text...>            say to the user (`S <<` for a multi-line message)
 ///   A <profile> <task...>  subagent
 ///   D <message...>         done (rest of stream joins the message)
 ///   <cfg verb> <args...>   config-declared tool
@@ -37,6 +38,11 @@ enum Pending {
     /// `X <<`: a multi-line script body — models reach for heredocs
     /// constantly, and eating the body as prose caused real error loops.
     Exec,
+    /// `S <<`: a multi-line message to the user. Without it S was the only
+    /// verb with no body, so a mid-run report the user needed to SEE had
+    /// nowhere legal to go — D ends the run, one S line cannot hold a list,
+    /// and prose is discarded. The model wrote markdown and lost it.
+    Say,
 }
 
 /// Feed streamed model output in arbitrary chunks; complete commands come out
@@ -172,7 +178,9 @@ impl Lexer {
                 }
             }
             'S' => {
-                if !rest.is_empty() {
+                if rest == "<<" {
+                    self.pending = Some((Pending::Say, Vec::new()));
+                } else if !rest.is_empty() {
                     out.push(Cmd::Say { text: rest.to_string() });
                 }
             }
@@ -205,6 +213,7 @@ fn close_payload(p: Pending, body: Vec<String>) -> Cmd {
         Pending::Insert { target, after } => Cmd::Insert { target, after, body },
         Pending::New { path } => Cmd::New { path, body },
         Pending::Exec => Cmd::Exec { line: body },
+        Pending::Say => Cmd::Say { text: body },
     }
 }
 

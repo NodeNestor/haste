@@ -10,6 +10,9 @@ use std::time::Instant;
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 120_000;
 const MAX_EMPTY_TURNS: u32 = 3;
+/// Consecutive work-free talk turns before the run ends anyway. S never ends
+/// the run, so without a cap a model that only narrates would loop forever.
+const MAX_TALK_TURNS: u32 = 3;
 
 /// Live events for a UI. Headless runs pass Ctl::default() and pay nothing.
 /// Serializes to one-line JSON for `--events` (machine supervisors, fleets).
@@ -152,6 +155,10 @@ pub fn run_session(
     let mut rep = Report::default();
     let mut empty_turns = 0u32;
     let mut degens = 0u32;
+    // Consecutive turns that produced only talk and no work (runaway guard).
+    let mut talk_turns = 0u32;
+    // D bounced because its report was discarded as prose (capped).
+    let mut prose_bounces = 0u32;
     let mut refusals = 0u32;
     let mut consec_errs = 0u32;
     // Real billed context: prompt_tokens from the provider's last usage
@@ -160,10 +167,6 @@ pub fn run_session(
     // Legend-delta cursor: files at index < this were already announced (or
     // are baked into a seal); the per-turn tail only lists what's new.
     let mut legend_base = 0usize;
-    // "Now scanning..." endings: how often we have refused to stop on
-    // trailing-ellipsis narration. Capped so a model that really does end
-    // every sentence with dots can still finish.
-    let mut ellipsis_refusals = 0u32;
     // Images queued by V: attached to exactly the next request, then dropped —
     // the model sees them once and can V again if it needs another look.
     let mut images: Vec<(String, String)> = Vec::new();
@@ -482,16 +485,25 @@ pub fn run_session(
         }
 
         let mut prose_rescued = false;
-        if tc.executed == 0 && tail.is_empty() {
+        if tc.executed == 0 {
             let prose = lexer.dropped_text.trim();
             if !prose.is_empty() {
-                // Prose rescue: a commands-free turn that is all prose IS the
-                // model talking — deliver it as an S instead of discarding it
-                // and aborting three turns later with the report unread.
+                // Prose rescue: a turn that did no WORK is the model talking —
+                // deliver it as an S instead of discarding it and aborting
+                // three turns later with the report unread.
+                //
+                // Deliberately not gated on `tail.is_empty()`: the commonest
+                // shape by far is one S of preamble ("Found H:. Now checking
+                // I:") followed by the actual content as markdown. Requiring
+                // zero commands meant emitting nothing was rescued while
+                // emitting a helpful one-liner first lost the whole report —
+                // which is exactly how a user gets an answer that stops
+                // mid-sentence. Work commands still suppress the rescue:
+                // prose BETWEEN real commands is narration, not a report.
                 prose_rescued = true;
                 tail.push(Cmd::Say { text: prose.to_string() });
-                tc.note("(that was prose, not commands — delivered to the user as S this once; wrap text in S yourself, or finish with D)".into());
-            } else {
+                tc.note("(that was prose, not commands — delivered to the user as S this once; for a multi-line message use `S <<` … `.` yourself, or finish with D)".into());
+            } else if tail.is_empty() {
                 empty_turns += 1;
                 if empty_turns >= MAX_EMPTY_TURNS {
                     rep.final_msg = "(aborted: model produced no commands)".into();
@@ -513,44 +525,34 @@ pub fn run_session(
         // never sees. Tell the model exactly what it lost.
         if lexer.dropped > 0 && !prose_rescued {
             tc.note(format!(
-                "({} plain-prose line{} DISCARDED. Text for the user goes in one S line or the D message; a multi-line SCRIPT goes in `X <<` … `.`. When resending, resend ONLY the lost lines — commands this turn already ran)",
+                "({} plain-prose line{} DISCARDED — the user never saw them. A multi-line message to the user goes in `S <<` … `.`; one line goes in `S <text>`; a final report goes in D. When resending, resend ONLY the lost lines — commands this turn already ran)",
                 lexer.dropped,
                 if lexer.dropped == 1 { " was" } else { "s were" }
             ));
         }
 
-        // A turn that is ONLY talk (S with no work and no subagents pending)
-        // means the model is waiting on the user: hand the mic back instead of
-        // looping into ever-rephrased clarification questions.
-        // (dropped >= 3 means a whole prose block was lost — the model was
-        // mid-report, not waiting on the user: let it retry with the note.)
-        let mut say_final = false;
-        let mut nudge_continue = false;
-        if tc.executed == 0
+        // S NEVER ends the run — D is the only way to stop. The harness used
+        // to guess which one the model meant by sniffing its prose
+        // (sounds_unfinished: "let me ", a trailing ellipsis, a trailing
+        // colon), which got it wrong in both directions: a report that read
+        // like narration was refused, and a genuine "now checking I:" ended
+        // the run mid-task with the user staring at half an answer. Intent is
+        // the model's to state, so it states it with the verb it picks.
+        //
+        // What DOES belong here is a runaway guard, same family as
+        // MAX_EMPTY_TURNS: a model that only ever talks would loop forever.
+        let talk_only = tc.executed == 0
             && tc.pending.is_empty()
             && !tail.is_empty()
-            && tail.iter().all(|c| matches!(c, Cmd::Say { .. }))
-            && (lexer.dropped < 3 || prose_rescued)
-        {
-            // "Found 11 dirs. Now scanning each..." is announcing the NEXT
-            // step, not waiting on the user — continuation-speak must not
-            // hand the mic back and end the run mid-task. Neither may ANY
-            // talk-only turn while plan steps are still open, unless it is
-            // an actual question for the user.
-            let last_say = tail.iter().rev().find_map(|c| match c {
-                Cmd::Say { text } => Some(text.as_str()),
-                _ => None,
-            });
-            let plan_open =
-                cfg.plan.enforce && plan_seen.values().any(|s| s == "todo" || s == "doing");
-            let trailing = last_say.is_some_and(|t| {
-                sounds_unfinished(t) || (plan_open && !t.trim_end().ends_with('?'))
-            });
-            if trailing && ellipsis_refusals < 3 {
-                ellipsis_refusals += 1;
-                nudge_continue = true;
-            } else {
-                say_final = true;
+            && tail.iter().all(|c| matches!(c, Cmd::Say { .. }));
+        let mut nudge_continue = false;
+        let mut talk_handback = false;
+        if talk_only {
+            talk_turns += 1;
+            if talk_turns >= MAX_TALK_TURNS {
+                talk_handback = true;
+                // Hand the mic back rather than spin: the model has had its
+                // say several turns running and done no work.
                 tc.executed += tail.len();
                 let text = tail
                     .drain(..)
@@ -559,15 +561,20 @@ pub fn run_session(
                         _ => unreachable!(),
                     })
                     .collect::<Vec<_>>()
-                    .join("\n");
+                    .join("
+");
                 tc.done = Some(text);
+            } else {
+                nudge_continue = true;
             }
+        } else {
+            talk_turns = 0;
         }
         for cmd in tail.drain(..) {
             tc.dispatch(cmd);
         }
         if nudge_continue {
-            tc.note("(you sound mid-task — do the next step NOW with commands; S alone ends nothing but stops the work, D is only for finished results)".into());
+            tc.note("(S never ends the run — do the next step NOW with commands. When you are finished, or you need the user, end with D)".into());
         }
         rep.commands += tc.executed;
         rep.tool_ms += tc.tool_us / 1000;
@@ -609,14 +616,14 @@ pub fn run_session(
         }
 
         if let Some(msg) = done {
-            // Every D gate below is skipped for solo-S mic-backs: those are
-            // conversation, not completion.
-            if !say_final {
+            // Every D gate below is skipped for a talk-cap handback: that is
+            // the harness stopping a spin, not the model claiming completion.
+            if !talk_handback {
                 // D alongside a DISCARDED prose block: "see summary above"
                 // pointing at text the user never saw. Bounce once so the
                 // model resends the report inside the D message itself.
-                if lexer.dropped >= 3 && ellipsis_refusals < 3 {
-                    ellipsis_refusals += 1;
+                if lexer.dropped >= 3 && prose_bounces < 3 {
+                    prose_bounces += 1;
                     note(
                         ledger,
                         &ctl,
@@ -629,25 +636,22 @@ pub fn run_session(
                     );
                     continue;
                 }
-                // A D that merely repeats this turn's S, or trails off in an
-                // ellipsis, is narration — the model is mid-work and reached
-                // for the wrong verb ("S checking X…" + "D checking X…").
+                // A D that merely repeats this turn's S is a duplicate, not a
+                // decision — the user already has that text. (Whether the
+                // model is "really" finished is its call, not ours: the prose
+                // sniffing that used to live here is gone.)
                 let d = clean_final(&msg).to_ascii_lowercase();
                 let echoes = |s: &String| {
                     let s = s.trim().to_ascii_lowercase();
                     s == d || s.starts_with(&d) || d.starts_with(&s)
                 };
-                let trailing = sounds_unfinished(&d) && ellipsis_refusals < 3;
-                if trailing {
-                    ellipsis_refusals += 1;
-                }
-                if !d.is_empty() && (says.iter().any(echoes) || trailing) {
+                if !d.is_empty() && says.iter().any(echoes) {
                     note(
                         ledger,
                         &ctl,
                         depth,
                         turn,
-                        "(D refused — that message narrates work in progress, and you already told the user with S. Keep working; D only with the RESULTS)".into(),
+                        "(D refused — that message only repeats what you just said with S; the user already has it. End with D carrying the RESULTS, or keep working)".into(),
                     );
                     continue;
                 }
@@ -749,17 +753,6 @@ pub fn run_session(
 /// "Now scanning..." / "Let me fix that." — text that promises MORE work.
 /// Ending a run on it looks like a freeze to the user: the last line on
 /// screen is a promise, the status quietly says idle, and they wait forever.
-fn sounds_unfinished(t: &str) -> bool {
-    let t = t.trim_end();
-    if t.ends_with("...") || t.ends_with('…') {
-        return true;
-    }
-    let lower = t.to_ascii_lowercase();
-    ["let me ", "i'll ", "i will ", "going to ", "next i ", "now i ", "fixing that"]
-        .iter()
-        .any(|p| lower.contains(p))
-}
-
 fn fmt_k(n: u64) -> String {
     if n >= 10_000 {
         format!("{:.1}k", n as f64 / 1000.0)
@@ -1256,8 +1249,8 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
             s.push_str(&format!("{v} <args>            {}\n", t.desc));
         }
     }
-    s.push_str("S <text>            say one line to the user WITHOUT finishing (progress, questions, findings)\n");
-    s.push_str("D <message>         done — ENDS THE RUN; message is your final report (may span lines to end of message). Progress updates are S, never D\n");
+    s.push_str("S <text>            say to the user and KEEP WORKING — S never ends the run. Multi-line message: `S <<` alone, then the lines, end with a line that is only \".\"\n");
+    s.push_str("D <message>         the ONLY way to end the run: you are finished, or you need the user. Message is your final report (may span lines to end of message)\n");
     let plan_file = &cfg.plan.file;
     s.push_str(
         "Rules: files get ids (#0,#1..) listed in the files: header — refer to them by id (with or without #). \
