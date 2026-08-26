@@ -1,6 +1,6 @@
 [package]
 name = "haste"
-version = "0.4.4"
+version = "0.5.0"
 edition = "2021"
 description = "Micro agent harness built for wafer-speed inference: minimum turns, minimum tokens, ~zero harness time."
 license-file = "LICENSE"
