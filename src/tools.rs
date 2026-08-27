@@ -51,6 +51,11 @@ const GREP_MAX_FILE_BYTES: u64 = 2_000_000;
 pub struct Workspace {
     pub root: PathBuf,
     files: Vec<PathBuf>,
+    /// Intern ids this run actually WROTE (E/I/N), as opposed to merely read.
+    /// The claim check needs ground truth about what the run did, and a model
+    /// that reports "written to out/x.json" having written nothing is the
+    /// failure it exists to catch.
+    written: std::collections::BTreeSet<u32>,
 }
 
 /// read_to_string with a UTF-8 BOM stripped: BOMs are display noise, break
@@ -63,7 +68,7 @@ fn read_clean(abs: &Path) -> Result<String, String> {
 
 impl Workspace {
     pub fn new(root: PathBuf) -> Workspace {
-        Workspace { root, files: Vec::new() }
+        Workspace { root, files: Vec::new(), written: std::collections::BTreeSet::new() }
     }
 
     pub fn intern(&mut self, rel: &Path) -> u32 {
@@ -93,9 +98,53 @@ impl Workspace {
         }
         let abs = self.root.join(&rel);
         if !abs.is_file() {
+            // Task text names files bare ("read migration_notes.md") while they
+            // live several directories down. The workspace layout is pinned in
+            // the model's context, but a weak model does not join the two and
+            // burns the run on dead reads instead. Resolve the basename when
+            // exactly ONE file in the workspace has it — unique means there is
+            // nothing to guess.
+            if let Some(found) = self.find_unique_basename(&rel) {
+                let fabs = self.root.join(&found);
+                return Ok((self.intern(&found), fabs));
+            }
             return Err(format!("not a file: {target}"));
         }
         Ok((self.intern(&rel), abs))
+    }
+
+    /// The single file under the root whose file name matches, or None when
+    /// there is no match or more than one (ambiguity is the model's to resolve).
+    fn find_unique_basename(&self, rel: &Path) -> Option<PathBuf> {
+        let name = rel.file_name()?;
+        let mut hit: Option<PathBuf> = None;
+        let mut stack = vec![self.root.clone()];
+        let mut seen = 0usize;
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for ent in rd.flatten() {
+                seen += 1;
+                if seen > 20_000 {
+                    return None; // huge tree: not worth the walk
+                }
+                let p = ent.path();
+                let fname = ent.file_name();
+                if p.is_dir() {
+                    if !SKIP_DIRS.iter().any(|s| fname == *s)
+                        && !fname.to_string_lossy().starts_with('.')
+                    {
+                        stack.push(p);
+                    }
+                } else if fname == name {
+                    let Ok(r) = p.strip_prefix(&self.root) else { continue };
+                    if hit.is_some() {
+                        return None; // ambiguous
+                    }
+                    hit = Some(r.to_path_buf());
+                }
+            }
+        }
+        hit
     }
 
     pub fn read(&mut self, target: &str, range: Option<(usize, usize)>) -> Result<String, String> {
@@ -130,6 +179,7 @@ impl Workspace {
         let nnew = new.len();
         lines.splice(a - 1..b, new);
         write_lines(&abs, &lines, text.ends_with('\n'))?;
+        self.written.insert(id);
         Ok(region_report(id, &lines, a, nnew))
     }
 
@@ -145,17 +195,29 @@ impl Workspace {
         let nnew = new.len();
         lines.splice(after..after, new);
         write_lines(&abs, &lines, text.ends_with('\n'))?;
+        self.written.insert(id);
         Ok(region_report(id, &lines, after + 1, nnew))
     }
 
     pub fn new_file(&mut self, path: &str, body: &str) -> Result<String, String> {
         let rel = PathBuf::from(path.replace('\\', "/"));
+        // A bodiless N is the model emitting `N path` as the last line of its
+        // message: Lexer::finish flushes the unterminated payload with nothing
+        // in it. A 0-line file is never what was meant, and for plan.json it
+        // manufactures an unparseable state machine that then blocks D.
+        if body.trim().is_empty() {
+            return Err(format!(
+                "refused: N {} had no content — the payload follows on the next lines and ends with a lone \".\"",
+                rel.display()
+            ));
+        }
         let abs = self.root.join(&rel);
         if let Some(dir) = abs.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         std::fs::write(&abs, format!("{body}\n")).map_err(|e| e.to_string())?;
         let id = self.intern(&rel);
+        self.written.insert(id);
         Ok(format!("#{id} {} created ({} lines)", rel.display(), body.lines().count()))
     }
 
@@ -398,6 +460,17 @@ impl Workspace {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok((id, mime.to_string(), b64, bytes.len()))
+    }
+
+    /// Paths written (E/I/N) this run, relative to the root. Ground truth for
+    /// the claim check — the harness knows this exactly, so the model is only
+    /// asked to MATCH a report against facts, never to judge them.
+    pub fn written_paths(&self) -> Vec<String> {
+        self.written
+            .iter()
+            .filter_map(|id| self.files.get(*id as usize))
+            .map(|p| p.display().to_string().replace('\\', "/"))
+            .collect()
     }
 
     /// Map of intern ids -> paths, for the prompt header.

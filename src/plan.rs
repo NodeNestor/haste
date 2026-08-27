@@ -97,6 +97,25 @@ impl Plan {
         std::fs::write(path, text + "\n").map_err(|e| e.to_string())
     }
 
+    /// Set one step's status. Returns Err naming the valid ids when the id is
+    /// unknown, so a typo costs one line instead of a silent no-op.
+    pub fn set_status(&mut self, id: &str, status: &str) -> Result<(), String> {
+        const VALID: [&str; 4] = ["todo", "doing", "done", "skip"];
+        if !VALID.contains(&status) {
+            return Err(format!("status must be one of {}", VALID.join("|")));
+        }
+        match self.steps.iter_mut().find(|s| s.id == id) {
+            Some(step) => {
+                step.status = status.to_string();
+                Ok(())
+            }
+            None => Err(format!(
+                "no step '{id}' — ids are: {}",
+                self.steps.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+
     pub fn open_ids(&self) -> Vec<String> {
         self.steps
             .iter()

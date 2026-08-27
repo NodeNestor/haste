@@ -9,6 +9,7 @@
 ///   G <regex> [id|path]    search
 ///   X <shell...>           run command
 ///   S <text...>            say to the user (`S <<` for a multi-line message)
+///   P <step-id> <status>   set a plan step's status (todo|doing|done|skip)
 ///   A <profile> <task...>  subagent
 ///   D <message...>         done (rest of stream joins the message)
 ///   <cfg verb> <args...>   config-declared tool
@@ -28,6 +29,10 @@ pub enum Cmd {
     Say { text: String },
     /// Signature outline of a file or directory (codemap).
     Outline { target: String },
+    /// Set a plan step's status. The harness edits plan.json itself, so a
+    /// status change costs a handful of output tokens instead of rewriting a
+    /// JSON document — models were deleting and recreating the file per step.
+    PlanStep { id: String, status: String },
     Custom { verb: char, args: String },
 }
 
@@ -186,6 +191,14 @@ impl Lexer {
             }
             'O' => {
                 out.push(Cmd::Outline { target: rest.to_string() });
+            }
+            'P' => {
+                let mut it = rest.splitn(2, ' ');
+                let id = it.next().unwrap_or("").to_string();
+                let status = it.next().unwrap_or("").trim().to_string();
+                if !id.is_empty() && !status.is_empty() {
+                    out.push(Cmd::PlanStep { id, status });
+                }
             }
             'D' => {
                 self.done_msg = Some(rest.to_string());

@@ -9,6 +9,21 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 
+/// Every chat request body the mock received, so a test can assert on what
+/// haste actually SENT — the prompt's shape, not just the resulting behaviour.
+static SENT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The last user-message content haste sent.
+fn last_user_doc() -> String {
+    let sent = SENT.lock().unwrap();
+    let body = sent.last().expect("no request captured").clone();
+    let v: serde_json::Value = serde_json::from_str(&body).expect("bad request json");
+    v["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Minimal scripted OpenAI-compatible SSE server: each request pops the next
 /// scripted assistant message and streams it back in small chunks.
 fn mock_server(scripts: Vec<&'static str>) -> u16 {
@@ -41,6 +56,11 @@ fn mock_server(scripts: Vec<&'static str>) -> u16 {
                 }
                 if hdr_end > 0 && buf.len() >= hdr_end + cl {
                     break;
+                }
+            }
+            if let Ok(txt) = std::str::from_utf8(&buf[hdr_end..]) {
+                if txt.contains("\"messages\"") {
+                    SENT.lock().unwrap().push(txt.to_string());
                 }
             }
             let msg = scripts.get(i).copied().unwrap_or("D out of script\n");
@@ -833,7 +853,13 @@ fn endless_talk_is_capped_so_the_run_cannot_spin() {
     let root = temp_repo();
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "go", None, 0, haste::agent::Ctl::default());
     assert_eq!(rep.turns, 3, "three work-free talk turns must end the run");
-    assert_eq!(rep.final_msg, "nearly there");
+    // The narration must NOT become the run's result — a caller (or a
+    // benchmark) reads final_msg and would score "nearly there" as an answer.
+    assert!(
+        rep.final_msg.contains("narration with no commands run"),
+        "narration was returned as the result: {}",
+        rep.final_msg
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1311,5 +1337,184 @@ fn prose_after_an_s_line_is_rescued_not_discarded() {
         "prose after an S line was discarded — the user never saw the report: {says:?}"
     );
     assert!(rep.turns >= 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_report_claiming_work_the_run_never_did_is_refused() {
+    // The failure no structural gate can see: the model reads some files,
+    // writes nothing, and ends with "findings written to out/report.json".
+    // The harness knows exactly what was written, so one prompt-cached call
+    // only has to MATCH the claim against that evidence.
+    let port = mock_server(vec![
+        "R greet.txt\nD Analysis complete. Findings written to out/report.json.\n",
+        // the claim-check call: the mock plays the checker and objects
+        "out/report.json is named as written but no files were created or modified.\n",
+        "N out/report.json\n{\"ok\":true}\n.\nD Analysis complete. Findings written to out/report.json.\n",
+        "OK\n",
+    ]);
+    let root = temp_repo();
+    let cfg: Arc<Config> = Arc::new(toml::from_str(&format!(
+        r#"
+[model]
+base_url = "http://127.0.0.1:{port}/v1"
+model = "mock"
+
+[context]
+mode = "working_set"
+budget_tokens = 8000
+max_turns = 10
+
+[verify]
+claims = true
+"#
+    ))
+    .unwrap());
+    let rep = haste::agent::run(cfg, root.clone(), "review the code", None, 0, haste::agent::Ctl::default());
+    // Turn 1's D was refused; the run continued and actually wrote the file.
+    assert_eq!(rep.turns, 2, "the empty-handed D must not end the run");
+    assert!(root.join("out/report.json").is_file(), "the file was never written");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(
+        ledger.contains("claims things this run did not do"),
+        "no claim-check refusal in the ledger"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn saying_the_same_thing_twice_ends_it_early() {
+    // The loop breaker keys on executed commands, so prose repetition is
+    // invisible to it. Identical narration twice running is stuck, not
+    // thinking — no need to burn the whole cap.
+    let port = mock_server(vec![
+        "S let me explore the workspace and read the files
+",
+        "S let me explore the workspace and read the files
+",
+        "D never reached
+",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "go", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.turns, 2, "a repeated narration must not run the cap out");
+    assert!(rep.final_msg.contains("narration with no commands run"), "{}", rep.final_msg);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_bare_filename_resolves_to_the_one_file_that_has_it() {
+    // Task text names files bare while they live several directories down.
+    // A unique basename has nothing to guess about.
+    let port = mock_server(vec!["R buried.txt
+", "D read it
+"]);
+    let root = temp_repo();
+    std::fs::create_dir_all(root.join("in/deep/nested")).unwrap();
+    std::fs::write(root.join("in/deep/nested/buried.txt"), "found me
+").unwrap();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "read buried.txt", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "read it");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("found me"), "the bare name did not resolve:
+{ledger}");
+    assert!(!ledger.contains("not a file: buried.txt"), "resolution did not fire");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_ambiguous_basename_is_not_guessed() {
+    // Two candidates means the model has to say which — silently picking one
+    // would edit the wrong file.
+    let port = mock_server(vec!["R dup.txt
+", "D tried
+"]);
+    let root = temp_repo();
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    std::fs::write(root.join("a/dup.txt"), "one
+").unwrap();
+    std::fs::write(root.join("b/dup.txt"), "two
+").unwrap();
+    let _ = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "read dup.txt", None, 0, haste::agent::Ctl::default());
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("not a file: dup.txt"), "an ambiguous name was guessed:
+{ledger}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_bodiless_new_file_is_refused_not_written_empty() {
+    // `N path` as the last line of a message: Lexer::finish flushes the
+    // unterminated payload empty. Writing a 0-line plan.json manufactures an
+    // unparseable state machine that then blocks D.
+    let port = mock_server(vec!["N plan.json
+", "D done
+"]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "plan it", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "done");
+    assert!(!root.join("plan.json").exists(), "an empty plan.json was written");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("had no content"), "no refusal note:
+{ledger}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn p_moves_a_plan_step_without_rewriting_the_file() {
+    // Before P, a status change meant re-emitting the whole plan document —
+    // models were writing it, deleting it with a shell command, and writing it
+    // again, hundreds of output tokens per step.
+    let port = mock_server(vec![
+        "N plan.json\n{\"goal\":\"g\",\"steps\":[{\"id\":\"s1\",\"what\":\"one\",\"status\":\"todo\"},{\"id\":\"s2\",\"what\":\"two\",\"status\":\"todo\"}]}\n.\n",
+        "P s1 done\nP s2 skip\n",
+        "D finished\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "go", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "finished");
+    let plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("plan.json")).unwrap()).unwrap();
+    assert_eq!(plan["steps"][0]["status"], "done", "P did not persist");
+    assert_eq!(plan["steps"][1]["status"], "skip");
+    assert_eq!(plan["steps"][0]["what"], "one", "P must not lose the rest of the step");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn p_on_an_unknown_step_names_the_real_ids() {
+    let port = mock_server(vec![
+        "N plan.json\n{\"goal\":\"g\",\"steps\":[{\"id\":\"schema\",\"what\":\"one\",\"status\":\"todo\"}]}\n.\n",
+        "P typo done\n",
+        "P schema done\nD ok\n",
+    ]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "go", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "ok");
+    let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("no step 'typo'") && ledger.contains("schema"), "unhelpful error:\n{ledger}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_no_prose_rule_is_restated_last_not_only_first() {
+    // Measured across 12 tasks: the rule on line 1 of the system prompt does
+    // nothing (deleting it changed compliance not at all), while the same
+    // words immediately before "## NOW" moved commands-first 56% -> 77% and
+    // halved discarded prose. Position, not wording — so guard the position.
+    let port = mock_server(vec!["R greet.txt\n", "D ok\n"]);
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "look", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "ok");
+    let sent = last_user_doc();
+    let now = sent.find("## NOW").expect("no ## NOW in the document");
+    let hint = sent.find("command lines ONLY").expect("reminder missing from the document");
+    assert!(hint < now, "the reminder must come BEFORE ## NOW, not after it");
+    assert!(
+        now - hint < 400,
+        "the reminder must be the LAST thing before ## NOW (gap was {})",
+        now - hint
+    );
     let _ = std::fs::remove_dir_all(root);
 }

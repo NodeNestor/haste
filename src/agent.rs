@@ -14,6 +14,10 @@ const MAX_EMPTY_TURNS: u32 = 3;
 /// the run, so without a cap a model that only narrates would loop forever.
 const MAX_TALK_TURNS: u32 = 3;
 
+/// Restated immediately before "## NOW". Identical in content to the system
+/// prompt's line 1 — the position is the whole point (see the call site).
+const NO_PROSE_REMINDER: &str = "REMINDER: reply with command lines ONLY — no prose, no markdown, no preamble. Your first character is a verb letter. Text for the user goes in S.\n";
+
 /// Live events for a UI. Headless runs pass Ctl::default() and pay nothing.
 /// Serializes to one-line JSON for `--events` (machine supervisors, fleets).
 #[derive(serde::Serialize)]
@@ -157,8 +161,13 @@ pub fn run_session(
     let mut degens = 0u32;
     // Consecutive turns that produced only talk and no work (runaway guard).
     let mut talk_turns = 0u32;
+    // Hash of the previous talk-only turn's text: the loop breaker keys on
+    // EXECUTED commands, so it cannot see a model repeating itself in prose.
+    let mut last_talk: u64 = 0;
     // D bounced because its report was discarded as prose (capped).
     let mut prose_bounces = 0u32;
+    // D refusals issued by the claim check (capped: a wrong checker must not trap the run).
+    let mut claim_refusals = 0u32;
     let mut refusals = 0u32;
     let mut consec_errs = 0u32;
     // Real billed context: prompt_tokens from the provider's last usage
@@ -363,7 +372,18 @@ pub fn run_session(
         let delta_legend = ctx_cfg.mode == "append" && ctx_cfg.compact == "model";
         let legend = if delta_legend { ws.legend_from(legend_base) } else { ws.legend() };
         let legend_snapshot = ws.file_count();
-        let user = format!("{}\n{}{}## NOW\nNext commands:\n", doc, legend, plan_view);
+        // The commands-only rule is line 1 of the system prompt and, measured,
+        // does nothing there: deleting it changes compliance not at all, while
+        // repeating the SAME words here — the last thing read before the model
+        // answers — moved commands-first from 56% to 77% across 12 tasks and
+        // halved the prose that gets discarded. Recency beats prominence; the
+        // model obeys whatever it read most recently, which used to be a
+        // pytest dump. It sits after the legend so the cached prefix is
+        // undisturbed.
+        let user = format!(
+            "{}\n{}{}{}## NOW\nNext commands:\n",
+            doc, legend, plan_view, NO_PROSE_REMINDER
+        );
         rep.render_us += t_r.elapsed().as_micros();
         rep.sent_tokens += est_tokens(&system) + est_tokens(&user);
 
@@ -549,21 +569,33 @@ pub fn run_session(
         let mut talk_handback = false;
         if talk_only {
             talk_turns += 1;
-            if talk_turns >= MAX_TALK_TURNS {
-                talk_handback = true;
-                // Hand the mic back rather than spin: the model has had its
-                // say several turns running and done no work.
-                tc.executed += tail.len();
-                let text = tail
-                    .drain(..)
-                    .map(|c| match c {
-                        Cmd::Say { text } => text,
-                        _ => unreachable!(),
+            // Saying the same thing twice running is stuck, not thinking: go
+            // straight to the handback instead of burning the rest of the cap.
+            let this_talk = crate::ledger::fnv(
+                &tail
+                    .iter()
+                    .filter_map(|c| match c {
+                        Cmd::Say { text } => Some(text.as_str()),
+                        _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join("
-");
-                tc.done = Some(text);
+"),
+            );
+            if this_talk == last_talk {
+                talk_turns = MAX_TALK_TURNS;
+            }
+            last_talk = this_talk;
+            if talk_turns >= MAX_TALK_TURNS {
+                talk_handback = true;
+                // Hand the mic back rather than spin. The says still reach the
+                // user through the normal dispatch below — what must NOT happen
+                // is "Let me explore the workspace and read the files." being
+                // returned as the run's RESULT, which is what a caller reads
+                // and what a benchmark grades.
+                tc.done = Some(format!(
+                    "(ended: {talk_turns} turns of narration with no commands run — the task was not attempted)"
+                ));
             } else {
                 nudge_continue = true;
             }
@@ -688,6 +720,72 @@ pub fn run_session(
                             ),
                         );
                         continue;
+                    }
+                }
+
+                // Claim check: one prompt-cached call asking whether the report
+                // matches what the run ACTUALLY did. The harness supplies the
+                // facts — files written, commands run, errors — so the model
+                // only MATCHES claims against evidence; it is never asked
+                // whether the work was any good. This is the gate for the
+                // failure the other gates structurally cannot see: a report
+                // that names a deliverable the run never produced.
+                if cfg.verify.claims && depth == 0 && claim_refusals < 2 {
+                    let wrote = ws.written_paths();
+                    let tool_errors = ledger
+                        .entries
+                        .iter()
+                        .filter(|e| e.kind == Kind::Result && e.text.starts_with("err:"))
+                        .count();
+                    let evidence = format!(
+                        "- files created or modified this run: {}
+- commands executed: {}
+- tool results that errored: {}
+",
+                        if wrote.is_empty() { "NONE".to_string() } else { wrote.join(", ") },
+                        rep.commands,
+                        tool_errors,
+                    );
+                    let cuser = format!(
+                        "{}
+## CHECK
+The agent is about to end the run with this report:
+---
+{}
+---
+Evidence from the run:
+{}
+List ONLY factual claims in the report that this evidence contradicts — a file said to be written that is not in the list, a command said to have been run that was not. Judgements about quality are not your concern. If every claim is supported, reply with exactly: OK
+",
+                        renderer.render(ledger, &ctx_cfg, turn),
+                        clean_final(&msg),
+                        evidence
+                    );
+                    let mut verdict = String::new();
+                    if let Ok(st) = client.stream(&system, &cuser, &[], &mut |d| verdict.push_str(d)) {
+                        rep.tok_in += st.prompt_tokens;
+                        rep.tok_out += st.completion_tokens;
+                        rep.model_ms += st.total_ms;
+                        let v = verdict.trim();
+                        let ok = v.is_empty()
+                            || v.eq_ignore_ascii_case("ok")
+                            || v.to_ascii_uppercase().starts_with("OK");
+                        if !ok {
+                            claim_refusals += 1;
+                            note(
+                                ledger,
+                                &ctl,
+                                depth,
+                                turn,
+                                format!(
+                                    "(D refused — your report claims things this run did not do:
+{}
+Do the work, or send a report that matches what actually happened)",
+                                    crate::tools::clip(v, 600)
+                                ),
+                            );
+                            continue;
+                        }
                     }
                 }
             }
@@ -828,6 +926,7 @@ fn action_of(cmd: &Cmd) -> String {
         Cmd::View { target } => format!("V {target}"),
         Cmd::Say { text } => format!("S {}", crate::tools::clip(text, 60)),
         Cmd::Outline { target } => format!("O {target}"),
+        Cmd::PlanStep { id, status } => format!("P {id} {status}"),
     }
 }
 
@@ -1020,6 +1119,25 @@ impl TurnCtx<'_> {
             Cmd::New { path, body } => flat(self.ws.new_file(&path, &body)),
             Cmd::Grep { pat, target } => flat(self.ws.grep(&pat, target.as_deref())),
             Cmd::Outline { target } => flat(self.ws.outline(&target)),
+            // The harness owns plan.json: the model names a step and a status,
+            // and pays a handful of tokens instead of re-emitting the whole
+            // document. Before this verb, models updated status by deleting
+            // and recreating the file — hundreds of output tokens per step.
+            Cmd::PlanStep { id, status } => {
+                let path = self.root.join(&self.cfg.plan.file);
+                match crate::plan::Plan::load(&path) {
+                    None => format!("err: no {} — create it first with N", self.cfg.plan.file),
+                    Some(Err(e)) => format!("err: {} is unparseable: {e}", self.cfg.plan.file),
+                    Some(Ok(mut plan)) => match plan.set_status(&id, &status) {
+                        Err(e) => format!("err: {e}"),
+                        Ok(()) => match plan.save(&path) {
+                            Err(e) => format!("err: {e}"),
+                            Ok(()) => format!("ok {id} -> {status}
+{}", plan.compact()),
+                        },
+                    },
+                }
+            }
             Cmd::Exec { line } => run_shell(&line, &self.ws.root, DEFAULT_TOOL_TIMEOUT_MS, &self.cfg.exec.shell),
             Cmd::Custom { verb, args } => match self.cfg.tool.get(&verb.to_string()) {
                 Some(t) => {
@@ -1249,6 +1367,8 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
             s.push_str(&format!("{v} <args>            {}\n", t.desc));
         }
     }
+    if allow('P') { s.push_str("P <step-id> <status> set a plan step to todo|doing|done|skip (the harness edits the plan file)
+"); }
     s.push_str("S <text>            say to the user and KEEP WORKING — S never ends the run. Multi-line message: `S <<` alone, then the lines, end with a line that is only \".\"\n");
     s.push_str("D <message>         the ONLY way to end the run: you are finished, or you need the user. Message is your final report (may span lines to end of message)\n");
     let plan_file = &cfg.plan.file;
@@ -1277,9 +1397,9 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
         ));
     }
     s.push_str(&format!(
-        "Plan: for multi-step work, create {plan_file} with N — \
+        "Plan: create {plan_file} ONCE with N before your first edit — only a task you can finish in a single command may skip it. Keep it SHORT: a checklist, not a document. After that NEVER rewrite, delete or re-create it — change a status with P alone (`P schema done`), which costs one line. Format: \
          {{\"goal\":\"...\",\"steps\":[{{\"id\":\"..\",\"what\":\"..\",\"status\":\"todo\",\"needs\":[],\"verify\":\"shell cmd\"}}]}}. \
-         It is a live state machine you keep current by editing it (status: todo/doing/done/skip). \
+         It is a live state machine and P is how you move it. \
          Marking a step done runs its verify automatically and REVERTS the status if it fails — \
          and REVERTS it too while any step in its needs is still open. \
          Steps whose needs are all met are INDEPENDENT: work them in parallel (one subagent per step). \

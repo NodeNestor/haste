@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 /// Verbs implemented natively in the binary. Config tools must not shadow
 /// these — except the single-line ones below, with an explicit override flag.
-pub const NATIVE_VERBS: &str = "REIGNXADVSO";
+pub const NATIVE_VERBS: &str = "REIGNXADVSOP";
 /// Natives a tool may replace with `override = true` (game-mod style). The
 /// payload verbs (E/I/N) and protocol verbs (S/D/A) stay native.
 pub const OVERRIDABLE_VERBS: &str = "RGXOV";
@@ -62,7 +62,7 @@ pub struct PromptCfg {
 /// files, injecting the result — deletes the model's explicit "run tests"
 /// turn (the most common turn in every trajectory). A failing verify also
 /// refuses a same-turn D.
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Clone)]
 pub struct VerifyCfg {
     #[serde(default)]
     pub cmd: Option<String>,
@@ -71,7 +71,25 @@ pub struct VerifyCfg {
     /// Pruner chain for the verify output (default: first failure only).
     #[serde(default = "d_verify_prune")]
     pub prune: String,
+    /// One prompt-cached model call at D: does the final report match what the
+    /// run ACTUALLY did? The harness supplies the ground truth (files written,
+    /// commands run, errors), so the model only matches claims against facts —
+    /// it is never asked to judge whether the work was good. Costs one request
+    /// per run, and the prefill is the document the provider already cached.
+    /// Opt-in: it adds one request per run, and turning it on for everyone is
+    /// a behaviour change that deserves its own measured release.
+    #[serde(default)]
+    pub claims: bool,
 }
+impl Default for VerifyCfg {
+    fn default() -> Self {
+        // Without this, an omitted [verify] table takes bool::default() for
+        // `claims` and silently disables the gate — `#[serde(default = ..)]`
+        // only fires when the table exists but the key does not.
+        Self { cmd: None, timeout_ms: d_verify_timeout(), prune: d_verify_prune(), claims: false }
+    }
+}
+
 fn d_verify_timeout() -> u64 {
     180_000
 }

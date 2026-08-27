@@ -42,6 +42,9 @@ result_cap_chars = 12000 # hard cap on any single tool result, applied before pr
 
 [verify]
 # cmd = "cargo test"     # runs automatically after every editing turn; failing verify refuses a same-turn D
+# claims = false         # one prompt-cached call at D: does the final report match what the run ACTUALLY did?
+                         # (harness supplies the facts - files written, commands run, errors - the model only
+                         #  matches claims against them). Catches "written to out/x.json" when nothing was written.
 # timeout_ms = 180000
 # prune = "first_failure"
 
@@ -55,7 +58,7 @@ max_tokens = 400
 
 # mods_dir = "~/.haste/mods"  # each subdir with a mod.toml adds verbs/prompt/env — see examples/mods/
 
-# ---- config-declared tools: one uppercase verb (outside REIGNXADVSO) each ----
+# ---- config-declared tools: one uppercase verb (outside REIGNXADVSOP) each ----
 # prune chain: head_tail:A,B | first_failure | errors_only | drop:REGEX | keep:REGEX | distill | none
 
 [tool.T]
@@ -74,7 +77,7 @@ desc = "fetch a URL (distilled to task-relevant facts)"
 cmd = "curl -sL --max-time 20 {args}"
 prune = "drop:^\\s*<|distill"
 
-[tool.P]
+[tool.K]
 desc = "screenshot the screen to shot.png (then V shot.png to see it)"
 cmd = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $bmp.Save('shot.png'); 'shot.png saved'"
 timeout_ms = 20000
