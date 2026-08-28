@@ -90,6 +90,27 @@ after every editing turn in the background. Steps with met needs are independent
 the model farms them to parallel subagents (`A researcher <task>`), each with its own
 ledger and budget, returning only a distilled brief.
 
+## Escalation thinking
+
+Reasoning models pay for deliberation on every turn; haste turns it on only when
+**not** thinking has demonstrably hurt. With `[model.think]` the run stays in fast
+mode until a concrete failure signal — a verify failure (auto-verify, the `D`-time
+gate, or a plan step's own verify reverting it), the loop breaker firing, or a
+degenerated generation — then the `kwargs` fragment rides the next `turns` requests
+and a ledger note tells the model why deliberation is on:
+
+```toml
+[model.think]
+kwargs = { chat_template_kwargs = { enable_thinking = true } }  # your provider's mapping
+on = ["verify_fail", "loop_warn", "collapse"]
+turns = 2
+```
+
+Measured on a bench task a fast model kept over-engineering: always-on thinking
+scored 0.995 but cost ~900s and 146K output tokens; fast mode ran in ~50s but
+bottomed out near 0.2. Gated, one verify failure armed a single thinking turn:
+**0.995 at 60s and 7.7K tokens**.
+
 ## Mods
 
 Drop a folder into `~/.haste/mods/` with a `mod.toml` and haste grows new verbs —
@@ -101,8 +122,9 @@ a ripgrep override, and a prompt-only mod. Project instruction files (`HASTE.md`
 
 ## Testing
 
-`cargo test` — 60 tests: lexer, pruners, dedup, compaction and phase seals, plan
-gating, the shell daemon, and full e2e loops against a scripted SSE server. CI asserts
+`cargo test` — 79 tests: lexer, pruners, dedup, compaction and phase seals, plan
+gating, escalation thinking, the shell daemon, and full e2e loops against a
+scripted SSE server. CI asserts
 harness overhead <250ms/task and <5ms/render, and ships Windows/Linux/macOS binaries
 on every `v*` tag.
 
