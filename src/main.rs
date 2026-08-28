@@ -165,7 +165,7 @@ fn main() {
         println!("{}", rep.final_msg);
     }
     eprintln!(
-        "\n-- haste: {} turns, {} cmds, {:.1}s wall | model {:.1}s (ttft sum {:.1}s) | tools {:.1}s | render {:.1}ms | in {}t ({}t cached) out {}t (~{}t est, {}ch) --",
+        "\n-- haste: {} turns, {} cmds, {:.1}s wall | model {:.1}s (ttft sum {:.1}s) | tools {:.1}s | render {:.1}ms | in {}t ({} cached) out {}t (~{}t est, {}ch) --",
         rep.turns,
         rep.commands,
         rep.wall_ms as f64 / 1000.0,
@@ -174,7 +174,7 @@ fn main() {
         rep.tool_ms as f64 / 1000.0,
         rep.render_us as f64 / 1000.0,
         rep.tok_in,
-        rep.tok_cached,
+        if rep.cached_reported { format!("{}t", rep.tok_cached) } else { "n/r".into() },
         rep.tok_out,
         rep.sent_tokens,
         rep.out_chars,

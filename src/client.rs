@@ -17,7 +17,10 @@ pub struct StreamStats {
     pub finish_reason: Option<String>,
     /// Exact usage from the provider (0 when not reported).
     pub prompt_tokens: u64,
-    pub cached_tokens: u64,
+    /// None when the provider's usage block has no prompt_tokens_details —
+    /// vLLM often omits it even with prefix caching active, and a printed 0
+    /// reads as "cache broken" when the truth is "not reported".
+    pub cached_tokens: Option<u64>,
     pub completion_tokens: u64,
 }
 
@@ -154,7 +157,7 @@ impl Client {
         let mut tail: Vec<u8> = Vec::with_capacity(3 * Self::MAX_PERIOD + 64);
         let mut since_scan = 0usize;
         let mut degenerate = false;
-        let mut usage = (0u64, 0u64, 0u64);
+        let mut usage = (0u64, None::<u64>, 0u64);
         let reader = BufReader::new(resp.into_reader());
         'outer: for line in reader.lines() {
             let line = line.map_err(|e| format!("stream read: {e}"))?;
@@ -169,7 +172,7 @@ impl Client {
             if v["usage"].is_object() {
                 usage = (
                     v["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
-                    v["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
+                    v["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64(),
                     v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
                 );
             }

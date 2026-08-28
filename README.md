@@ -82,7 +82,7 @@ perfectly) but cached tokens bill at the **full** input rate — keep
 
 ## Plans, verify loops, subagents
 
-For multi-step work the model writes `plan.json` — a live state machine the harness
+For multi-step work the model writes `.haste/plan.json` — a live state machine the harness
 enforces: entering a step injects the research→approach→implement protocol; marking it
 done runs its `verify` and **reverts on failure** (and while its `needs` are open); `D`
 is refused until every step is done or skipped. Auto-verify runs your `[verify] cmd`

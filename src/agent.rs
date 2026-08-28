@@ -88,6 +88,8 @@ pub struct Report {
     /// Exact provider-reported usage (0 when the provider doesn't send it).
     pub tok_in: u64,
     pub tok_cached: u64,
+    /// Whether any response actually carried prompt_tokens_details.cached_tokens.
+    pub cached_reported: bool,
     pub tok_out: u64,
     /// History seals (model compactions) performed during the run.
     pub seals: u32,
@@ -308,7 +310,8 @@ pub fn run_session(
             if let Ok(s) = client.stream(&system, &cuser, &[], &mut |d| summary.push_str(d)) {
                 rep.model_ms += s.total_ms;
                 rep.tok_in += s.prompt_tokens;
-                rep.tok_cached += s.cached_tokens;
+                rep.tok_cached += s.cached_tokens.unwrap_or(0);
+                rep.cached_reported |= s.cached_tokens.is_some();
                 rep.tok_out += s.completion_tokens;
                 let summary = clean_final(summary.trim());
                 // A collapsed generation must never become the briefing. The
@@ -451,7 +454,8 @@ pub fn run_session(
                 rep.ttft_ms_sum += s.ttft_ms;
                 rep.out_chars += s.out_chars;
                 rep.tok_in += s.prompt_tokens;
-                rep.tok_cached += s.cached_tokens;
+                rep.tok_cached += s.cached_tokens.unwrap_or(0);
+                rep.cached_reported |= s.cached_tokens.is_some();
                 rep.tok_out += s.completion_tokens;
                 let fr = s.finish_reason.as_deref();
                 (fr == Some("length"), fr == Some("degenerate"))
@@ -1378,7 +1382,10 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
          Batch independent commands in one message. Results arrive in the next message. \
          Edit results already show the updated lines — do not re-read a file after editing it. \
          Never emit long runs of one repeated character (dashes, =, !); keep separators under 40 chars. \
-         Verify edits by running checks/tests. Be terse.\n\
+         Verify edits by running checks/tests. Be terse. \
+         The deliverable is exactly the files the task names: never leave helper scripts, scratch \
+         files, or test DBs in the project tree (scratch goes in .haste/), and never move required \
+         logic out of a named deliverable into a companion file the task did not ask for.\n\
          Example message (nothing but commands):\n\
          R config.py\n\
          G \"load_cfg\" src\n\

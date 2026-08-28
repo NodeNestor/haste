@@ -107,7 +107,10 @@ pub struct PlanCfg {
     pub enforce: bool,
 }
 fn d_plan_file() -> String {
-    "plan.json".into()
+    // Inside .haste/ so the harness's own state never pollutes the user's
+    // tree — a graded or committed workspace must only gain files the task
+    // itself asked for.
+    ".haste/plan.json".into()
 }
 impl Default for PlanCfg {
     fn default() -> Self {

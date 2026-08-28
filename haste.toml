@@ -49,7 +49,7 @@ result_cap_chars = 12000 # hard cap on any single tool result, applied before pr
 # prune = "first_failure"
 
 [plan]
-# file = "plan.json"     # the live plan state machine the model edits
+# file = ".haste/plan.json"  # the live plan state machine the model edits (inside .haste/ so it never pollutes the project tree)
 # enforce = true         # refuse D while steps are open; auto-verify steps marked done
 
 [distill]

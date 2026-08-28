@@ -393,7 +393,7 @@ fn auto_verify_runs_after_edits_and_gates_done() {
 fn plan_state_machine_enforces_and_verifies() {
     let port = mock_server(vec![
         // t1: write a plan with one verifiable step, then try to D early.
-        "N plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"fix\",\"what\":\"fix greet\",\"status\":\"doing\",\"verify\":\"echo ok\"}]}\n.\nD all done\n",
+        "N .haste/plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"fix\",\"what\":\"fix greet\",\"status\":\"doing\",\"verify\":\"echo ok\"}]}\n.\nD all done\n",
         // t2 (D was refused): mark the step done, then D for real.
         "E 0 1:1\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"fix\",\"what\":\"fix greet\",\"status\":\"done\",\"verify\":\"echo ok\"}]}\n.\nD actually done\n",
     ]);
@@ -417,15 +417,15 @@ fn plan_state_machine_enforces_and_verifies() {
 fn lying_about_done_gets_reverted_by_verify() {
     let port = mock_server(vec![
         // One step whose verify fails — model claims done and tries to D.
-        "N plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"broken\",\"status\":\"done\",\"verify\":\"exit 3\"}]}\n.\nD shipped it\n",
+        "N .haste/plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"broken\",\"status\":\"done\",\"verify\":\"exit 3\"}]}\n.\nD shipped it\n",
         // After the revert + refusal, model descopes honestly (N overwrites —
         // the revert-save pretty-printed the file, so line edits are stale).
-        "N plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"broken\",\"status\":\"skip\",\"verify\":\"exit 3\"}]}\n.\nD descoped\n",
+        "N .haste/plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"broken\",\"status\":\"skip\",\"verify\":\"exit 3\"}]}\n.\nD descoped\n",
     ]);
     let root = temp_repo();
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "ship", None, 0, haste::agent::Ctl::default());
     assert_eq!(rep.final_msg, "descoped");
-    let plan = std::fs::read_to_string(root.join("plan.json")).unwrap();
+    let plan = std::fs::read_to_string(root.join(".haste/plan.json")).unwrap();
     assert!(plan.contains("skip"), "{plan}");
     let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
     assert!(ledger.contains("verify FAILED"), "revert note missing");
@@ -869,7 +869,7 @@ fn completed_plan_step_triggers_phase_seal_under_budget() {
     // is — so finishing step one must compact right at the boundary.
     let port = mock_server(vec![
         // Turn 1: plan with one verified step + padding work (arms hysteresis).
-        "N plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"s1\",\"what\":\"pad\",\"status\":\"todo\",\"verify\":\"echo ok\"}]}\n.\nX echo a\nX echo b\nX echo c\nX echo d\nX echo e\n",
+        "N .haste/plan.json\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"s1\",\"what\":\"pad\",\"status\":\"todo\",\"verify\":\"echo ok\"}]}\n.\nX echo a\nX echo b\nX echo c\nX echo d\nX echo e\n",
         // Turn 2: mark the step done — next turn top is the phase boundary.
         "E 0 1:1\n{\"goal\":\"demo\",\"steps\":[{\"id\":\"s1\",\"what\":\"pad\",\"status\":\"done\",\"verify\":\"echo ok\"}]}\n.\n",
         // Turn 3, request 1: the phase-seal compaction call.
@@ -997,16 +997,16 @@ fn plan_with_trailing_commas_still_parses() {
 fn blocked_step_cannot_be_marked_done() {
     let port = mock_server(vec![
         // s2 depends on s1 (still todo) — the model lies s2 done anyway.
-        "N plan.json\n{\"goal\":\"gate\",\"steps\":[{\"id\":\"s1\",\"what\":\"first\",\"status\":\"todo\"},{\"id\":\"s2\",\"what\":\"second\",\"status\":\"done\",\"needs\":[\"s1\"]}]}\n.\n",
+        "N .haste/plan.json\n{\"goal\":\"gate\",\"steps\":[{\"id\":\"s1\",\"what\":\"first\",\"status\":\"todo\"},{\"id\":\"s2\",\"what\":\"second\",\"status\":\"done\",\"needs\":[\"s1\"]}]}\n.\n",
         // After the revert note: do it in order.
-        "N plan.json\n{\"goal\":\"gate\",\"steps\":[{\"id\":\"s1\",\"what\":\"first\",\"status\":\"done\"},{\"id\":\"s2\",\"what\":\"second\",\"status\":\"done\",\"needs\":[\"s1\"]}]}\n.\nD in order\n",
+        "N .haste/plan.json\n{\"goal\":\"gate\",\"steps\":[{\"id\":\"s1\",\"what\":\"first\",\"status\":\"done\"},{\"id\":\"s2\",\"what\":\"second\",\"status\":\"done\",\"needs\":[\"s1\"]}]}\n.\nD in order\n",
     ]);
     let root = temp_repo();
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "gated", None, 0, haste::agent::Ctl::default());
     assert_eq!(rep.final_msg, "in order");
     let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
     assert!(ledger.contains("BLOCKED by open step"), "no gate note in ledger");
-    let plan = std::fs::read_to_string(root.join("plan.json")).unwrap();
+    let plan = std::fs::read_to_string(root.join(".haste/plan.json")).unwrap();
     assert!(plan.contains("\"done\""), "{plan}");
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1014,7 +1014,7 @@ fn blocked_step_cannot_be_marked_done() {
 #[test]
 fn step_kickoff_protocol_fires_on_doing_transition() {
     let port = mock_server(vec![
-        "N plan.json\n{\"goal\":\"kick\",\"steps\":[{\"id\":\"s1\",\"what\":\"the work\",\"status\":\"todo\"}]}\n.\n",
+        "N .haste/plan.json\n{\"goal\":\"kick\",\"steps\":[{\"id\":\"s1\",\"what\":\"the work\",\"status\":\"todo\"}]}\n.\n",
         "E 0 1:1\n{\"goal\":\"kick\",\"steps\":[{\"id\":\"s1\",\"what\":\"the work\",\"status\":\"doing\"}]}\n.\n",
         "E 0 1:1\n{\"goal\":\"kick\",\"steps\":[{\"id\":\"s1\",\"what\":\"the work\",\"status\":\"done\"}]}\n.\nD kicked\n",
     ]);
@@ -1029,10 +1029,10 @@ fn step_kickoff_protocol_fires_on_doing_transition() {
 #[test]
 fn talk_only_turn_with_open_plan_does_not_end_the_run() {
     let port = mock_server(vec![
-        "N plan.json\n{\"goal\":\"keep going\",\"steps\":[{\"id\":\"s1\",\"what\":\"the fix\",\"status\":\"doing\"}]}\n.\n",
+        "N .haste/plan.json\n{\"goal\":\"keep going\",\"steps\":[{\"id\":\"s1\",\"what\":\"the fix\",\"status\":\"doing\"}]}\n.\n",
         // Solo-S narration mid-plan — must be nudged back to work, not mic-backed.
         "S still working through the rounding logic\n",
-        "N plan.json\n{\"goal\":\"keep going\",\"steps\":[{\"id\":\"s1\",\"what\":\"the fix\",\"status\":\"done\"}]}\n.\nD finished\n",
+        "N .haste/plan.json\n{\"goal\":\"keep going\",\"steps\":[{\"id\":\"s1\",\"what\":\"the fix\",\"status\":\"done\"}]}\n.\nD finished\n",
     ]);
     let root = temp_repo();
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "go", None, 0, haste::agent::Ctl::default());
@@ -1448,13 +1448,13 @@ fn a_bodiless_new_file_is_refused_not_written_empty() {
     // `N path` as the last line of a message: Lexer::finish flushes the
     // unterminated payload empty. Writing a 0-line plan.json manufactures an
     // unparseable state machine that then blocks D.
-    let port = mock_server(vec!["N plan.json
+    let port = mock_server(vec!["N .haste/plan.json
 ", "D done
 "]);
     let root = temp_repo();
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "plan it", None, 0, haste::agent::Ctl::default());
     assert_eq!(rep.final_msg, "done");
-    assert!(!root.join("plan.json").exists(), "an empty plan.json was written");
+    assert!(!root.join(".haste/plan.json").exists(), "an empty plan.json was written");
     let ledger = std::fs::read_to_string(root.join(".haste/ledger.jsonl")).unwrap();
     assert!(ledger.contains("had no content"), "no refusal note:
 {ledger}");
@@ -1467,7 +1467,7 @@ fn p_moves_a_plan_step_without_rewriting_the_file() {
     // models were writing it, deleting it with a shell command, and writing it
     // again, hundreds of output tokens per step.
     let port = mock_server(vec![
-        "N plan.json\n{\"goal\":\"g\",\"steps\":[{\"id\":\"s1\",\"what\":\"one\",\"status\":\"todo\"},{\"id\":\"s2\",\"what\":\"two\",\"status\":\"todo\"}]}\n.\n",
+        "N .haste/plan.json\n{\"goal\":\"g\",\"steps\":[{\"id\":\"s1\",\"what\":\"one\",\"status\":\"todo\"},{\"id\":\"s2\",\"what\":\"two\",\"status\":\"todo\"}]}\n.\n",
         "P s1 done\nP s2 skip\n",
         "D finished\n",
     ]);
@@ -1475,7 +1475,7 @@ fn p_moves_a_plan_step_without_rewriting_the_file() {
     let rep = haste::agent::run(Arc::new(cfg_for(port)), root.clone(), "go", None, 0, haste::agent::Ctl::default());
     assert_eq!(rep.final_msg, "finished");
     let plan: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(root.join("plan.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(root.join(".haste/plan.json")).unwrap()).unwrap();
     assert_eq!(plan["steps"][0]["status"], "done", "P did not persist");
     assert_eq!(plan["steps"][1]["status"], "skip");
     assert_eq!(plan["steps"][0]["what"], "one", "P must not lose the rest of the step");
@@ -1485,7 +1485,7 @@ fn p_moves_a_plan_step_without_rewriting_the_file() {
 #[test]
 fn p_on_an_unknown_step_names_the_real_ids() {
     let port = mock_server(vec![
-        "N plan.json\n{\"goal\":\"g\",\"steps\":[{\"id\":\"schema\",\"what\":\"one\",\"status\":\"todo\"}]}\n.\n",
+        "N .haste/plan.json\n{\"goal\":\"g\",\"steps\":[{\"id\":\"schema\",\"what\":\"one\",\"status\":\"todo\"}]}\n.\n",
         "P typo done\n",
         "P schema done\nD ok\n",
     ]);
