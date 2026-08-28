@@ -1466,7 +1466,7 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     if allow('P') { s.push_str("P <step-id> <status> set a plan step to todo|doing|done|skip (the harness edits the plan file)
 "); }
     if cfg.model.think.as_ref().is_some_and(|t| t.on.iter().any(|s| s == "request")) {
-        s.push_str("B <why>             request deliberation (slow, thorough thinking) for your next turns — ONLY when genuinely stuck or the step is subtle; max 2 per run\n");
+        s.push_str("B <why>             request deliberation (slow, thorough thinking) for your next turns. Use BEFORE high-stakes work — schema/data migrations, tricky SQL, concurrency, security, irreversible changes — and when stuck or repeatedly wrong. Skip it for routine edits; max 2 per run\n");
     }
     s.push_str("S <text>            say to the user and KEEP WORKING — S never ends the run. Multi-line message: `S <<` alone, then the lines, end with a line that is only \".\"\n");
     s.push_str("D <message>         the ONLY way to end the run: you are finished, or you need the user. Message is your final report (may span lines to end of message)\n");
