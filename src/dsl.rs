@@ -33,6 +33,10 @@ pub enum Cmd {
     /// status change costs a handful of output tokens instead of rewriting a
     /// JSON document — models were deleting and recreating the file per step.
     PlanStep { id: String, status: String },
+    /// B <why>: the model requests deliberation (escalation thinking) for the
+    /// next turns. Config-gated ("request" in [model.think] on) and capped
+    /// per run so it stays a scalpel, not a lifestyle.
+    Think { why: String },
     Custom { verb: char, args: String },
 }
 
@@ -199,6 +203,9 @@ impl Lexer {
                 if !id.is_empty() && !status.is_empty() {
                     out.push(Cmd::PlanStep { id, status });
                 }
+            }
+            'B' => {
+                out.push(Cmd::Think { why: rest.to_string() });
             }
             'D' => {
                 self.done_msg = Some(rest.to_string());

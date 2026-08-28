@@ -23,8 +23,9 @@ enable_thinking = false                   # no effort — iterate, don't deliber
 
 # [model.think]                           # escalation thinking: fast by default, deliberate on evidence
 # kwargs = { chat_template_kwargs = { enable_thinking = true } }  # body fragment for escalated turns (same shape as an effort preset)
-# on = ["verify_fail", "loop_warn", "collapse"]  # the failure signals that arm it
+# on = ["verify_fail", "loop_warn", "collapse", "request"]  # failure signals that arm it; "request" also gives the model a B <why> verb
 # turns = 2                               # how many requests thinking stays on after a trigger
+# after = 2                               # Nth failure of the same thing arms it (1st = normal iteration)
 
 [prompt]
 # system = "You are haste, ..."           # replaces the built-in identity line (command reference stays generated)

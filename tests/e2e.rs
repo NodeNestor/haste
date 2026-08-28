@@ -1570,3 +1570,41 @@ max_turns = 10
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn b_verb_requests_deliberation_for_next_turn() {
+    let port = mock_server(vec![
+        "B this schema interaction is subtle\n",
+        "D thought it through\n",
+    ]);
+    let toml = format!(
+        r#"
+[model]
+base_url = "http://127.0.0.1:{port}/v1"
+model = "mock"
+
+[model.think]
+kwargs = {{ chat_template_kwargs = {{ enable_thinking = true }} }}
+on = ["request"]
+turns = 1
+
+[context]
+mode = "working_set"
+budget_tokens = 8000
+max_turns = 6
+"#
+    );
+    let cfg: Config = toml::from_str(&toml).unwrap();
+    let root = temp_repo();
+    let task = "ask for thinking via the B verb zq7w";
+    let rep = haste::agent::run(Arc::new(cfg), root.clone(), task, None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.turns, 2, "final: {}", rep.final_msg);
+    let ours: Vec<String> = SENT.lock().unwrap().iter().filter(|b| b.contains(task)).cloned().collect();
+    assert_eq!(ours.len(), 2);
+    assert!(!ours[0].contains("enable_thinking"), "first request must be fast");
+    assert!(
+        ours[1].contains("\"enable_thinking\":true"),
+        "the request after B did not carry the think kwargs"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

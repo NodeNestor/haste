@@ -184,11 +184,20 @@ pub struct ThinkCfg {
     /// How many model requests thinking stays on after a trigger.
     #[serde(default = "d_think_turns")]
     pub turns: u32,
+    /// How many failures of the SAME thing arm the gate. The first verify
+    /// failure is normal build-test iteration; the second is proof the fast
+    /// path is stuck. loop_warn ignores this (its 3x-identical threshold is
+    /// already proof).
+    #[serde(default = "d_think_after")]
+    pub after: u32,
 }
 fn d_think_on() -> Vec<String> {
     vec!["verify_fail".into(), "loop_warn".into(), "collapse".into()]
 }
 fn d_think_turns() -> u32 {
+    2
+}
+fn d_think_after() -> u32 {
     2
 }
 fn d_temperature() -> f32 {

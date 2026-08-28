@@ -189,6 +189,12 @@ pub fn run_session(
     // Escalation thinking ([model.think]): requests remaining with the think
     // kwargs applied. 0 = fast mode. Failure signals bump it to cfg turns.
     let mut think_left: u32 = 0;
+    // Failure streaks per key ("@verify", or a plan step id): the gate arms on
+    // the `after`-th failure of the SAME thing, not the first.
+    let mut vfail_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let think_after = cfg.model.think.as_ref().map(|t| t.after).unwrap_or(2);
+    // B-verb requests honored so far (capped at 2 per run).
+    let mut think_reqs: u32 = 0;
     let escalate = |think_left: &mut u32, sig: &str| -> bool {
         match &cfg.model.think {
             Some(t) if t.on.iter().any(|s| s == sig) => {
@@ -256,8 +262,14 @@ pub fn run_session(
             if let Some(h) = verify_bg.take() {
                 if let Ok((ok, text)) = h.join() {
                     note(ledger, &ctl, depth, turn, text);
-                    if !ok && escalate(&mut think_left, "verify_fail") {
-                        note(ledger, &ctl, depth, turn, "(thinking enabled for the next turns: the verify failure means this needs more deliberation)".into());
+                    if ok {
+                        vfail_counts.remove("@verify");
+                    } else {
+                        let c = vfail_counts.entry("@verify".into()).or_insert(0);
+                        *c += 1;
+                        if *c >= think_after && escalate(&mut think_left, "verify_fail") {
+                            note(ledger, &ctl, depth, turn, "(thinking enabled for the next turns: repeated verify failure means this needs more deliberation)".into());
+                        }
                     }
                 }
             }
@@ -266,13 +278,17 @@ pub fn run_session(
         // Plan tick: verify fresh "done"s, get the always-visible view. Runs
         // BEFORE compaction so a completed step can trigger a phase seal.
         let dones_before = plan_seen.values().filter(|s| s.as_str() == "done").count();
-        let (plan_view, _, plan_vfail) = if cfg.plan.enforce {
+        let (plan_view, _, plan_vfails) = if cfg.plan.enforce {
             plan_tick(&plan_path, &mut plan_seen, &cfg.exec.shell, &root, ledger, &ctl, depth, turn)
         } else {
-            (String::new(), Vec::new(), false)
+            (String::new(), Vec::new(), Vec::new())
         };
-        if plan_vfail && escalate(&mut think_left, "verify_fail") {
-            note(ledger, &ctl, depth, turn, "(thinking enabled for the next turns: the step's verify failure means this needs more deliberation)".into());
+        for id in &plan_vfails {
+            let c = vfail_counts.entry(id.clone()).or_insert(0);
+            *c += 1;
+            if *c >= think_after && escalate(&mut think_left, "verify_fail") {
+                note(ledger, &ctl, depth, turn, format!("(thinking enabled for the next turns: step '{id}' has failed its verify repeatedly — this needs more deliberation)"));
+            }
         }
         let phase_done = plan_seen.values().filter(|s| s.as_str() == "done").count() > dones_before;
         if depth == 0 {
@@ -418,6 +434,7 @@ pub fn run_session(
         let mut tail: Vec<Cmd> = Vec::new();
         let mut chunk: Vec<Cmd> = Vec::new();
         let mut loop_warned = false;
+        let mut think_req: Option<String> = None;
         let think_overlay = if think_left > 0 {
             think_left -= 1;
             cfg.model.think.as_ref().map(|t| &t.kwargs)
@@ -441,6 +458,7 @@ pub fn run_session(
             repeats: &mut repeats,
             refusals: &mut refusals,
             loop_warned: &mut loop_warned,
+            think_req: &mut think_req,
             done: None,
             edited: false,
             executed: 0,
@@ -509,7 +527,7 @@ pub fn run_session(
 
         if degenerated {
             degens += 1;
-            if escalate(&mut think_left, "collapse") {
+            if degens >= think_after && escalate(&mut think_left, "collapse") {
                 tc.note("(thinking enabled for the next turns: repeated collapse means this needs more deliberation)".into());
             }
             // Every note is unique text: stacking IDENTICAL lines was itself a
@@ -648,6 +666,18 @@ pub fn run_session(
         if loop_warned && escalate(&mut think_left, "loop_warn") {
             note(ledger, &ctl, depth, turn, "(thinking enabled for the next turns: the repeated identical result means this needs a different, deliberate approach)".into());
         }
+        if let Some(why) = think_req.take() {
+            let request_on = cfg.model.think.as_ref().is_some_and(|t| t.on.iter().any(|s| s == "request"));
+            if !request_on {
+                note(ledger, &ctl, depth, turn, "(B ignored — [model.think] has no \"request\" trigger configured)".into());
+            } else if think_reqs >= 2 {
+                note(ledger, &ctl, depth, turn, "(B refused — deliberation was already requested twice this run; work with what you have)".into());
+            } else {
+                think_reqs += 1;
+                escalate(&mut think_left, "request");
+                note(ledger, &ctl, depth, turn, format!("(deliberation on for the next turns — your reason: {})", crate::tools::clip(&why, 200)));
+            }
+        }
         // Auto-verify: after any editing turn, the configured check runs in a
         // BACKGROUND thread — the model keeps working while tests run; the
         // result is harvested at a later turn top. A D joins the run first
@@ -735,8 +765,10 @@ pub fn run_session(
                         note(ledger, &ctl, depth, turn, text);
                         if !ok {
                             note(ledger, &ctl, depth, turn, "(D refused — auto-verify FAILED after your edits; fix it first)".into());
-                            if escalate(&mut think_left, "verify_fail") {
-                                note(ledger, &ctl, depth, turn, "(thinking enabled for the next turns: the verify failure means this needs more deliberation)".into());
+                            let c = vfail_counts.entry("@verify".into()).or_insert(0);
+                            *c += 1;
+                            if *c >= think_after && escalate(&mut think_left, "verify_fail") {
+                                note(ledger, &ctl, depth, turn, "(thinking enabled for the next turns: repeated verify failure means this needs more deliberation)".into());
                             }
                             continue;
                         }
@@ -745,10 +777,14 @@ pub fn run_session(
                 // The plan state machine gets the last word: verify statuses
                 // changed THIS turn, then refuse D while steps are open.
                 if cfg.plan.enforce {
-                    let (_, open, d_vfail) =
+                    let (_, open, d_vfails) =
                         plan_tick(&plan_path, &mut plan_seen, &cfg.exec.shell, &root, ledger, &ctl, depth, turn);
-                    if d_vfail && escalate(&mut think_left, "verify_fail") {
-                        note(ledger, &ctl, depth, turn, "(thinking enabled for the next turns: the step's verify failure means this needs more deliberation)".into());
+                    for id in &d_vfails {
+                        let c = vfail_counts.entry(id.clone()).or_insert(0);
+                        *c += 1;
+                        if *c >= think_after && escalate(&mut think_left, "verify_fail") {
+                            note(ledger, &ctl, depth, turn, format!("(thinking enabled for the next turns: step '{id}' has failed its verify repeatedly — this needs more deliberation)"));
+                        }
                     }
                     if !open.is_empty() {
                         note(
@@ -970,6 +1006,7 @@ fn action_of(cmd: &Cmd) -> String {
         Cmd::Say { text } => format!("S {}", crate::tools::clip(text, 60)),
         Cmd::Outline { target } => format!("O {target}"),
         Cmd::PlanStep { id, status } => format!("P {id} {status}"),
+        Cmd::Think { .. } => "B".into(),
     }
 }
 
@@ -996,6 +1033,8 @@ struct TurnCtx<'a> {
     /// Set when the loop breaker fires this turn — the run-loop reads it to
     /// escalate thinking ([model.think] "loop_warn").
     loop_warned: &'a mut bool,
+    /// A `B <why>` from this turn: the model asking for deliberation.
+    think_req: &'a mut Option<String>,
     done: Option<String>,
     edited: bool,
     executed: usize,
@@ -1186,6 +1225,12 @@ impl TurnCtx<'_> {
                     },
                 }
             }
+            Cmd::Think { why } => {
+                // The actual arming happens in the run loop (it owns the gate
+                // state); here the request is just recorded for this turn.
+                *self.think_req = Some(if why.is_empty() { "(no reason given)".into() } else { why });
+                "ok — noted; deliberation is decided at turn end".into()
+            }
             Cmd::Exec { line } => run_shell(&line, &self.ws.root, DEFAULT_TOOL_TIMEOUT_MS, &self.cfg.exec.shell),
             Cmd::Custom { verb, args } => match self.cfg.tool.get(&verb.to_string()) {
                 Some(t) => {
@@ -1270,10 +1315,10 @@ fn plan_tick(
     ctl: &Ctl,
     depth: u8,
     turn: u32,
-) -> (String, Vec<String>, bool) {
+) -> (String, Vec<String>, Vec<String>) {
     use crate::plan::Plan;
     let Some(res) = Plan::load(plan_path) else {
-        return (String::new(), Vec::new(), false);
+        return (String::new(), Vec::new(), Vec::new());
     };
     let mut p = match res {
         Ok(p) => p,
@@ -1281,12 +1326,12 @@ fn plan_tick(
             return (
                 format!("## PLAN: PARSE ERROR — fix the file: {}\n", crate::tools::clip(&e, 200)),
                 vec!["(unparseable plan)".into()],
-                false,
+                Vec::new(),
             )
         }
     };
     let mut dirty = false;
-    let mut verify_failed = false;
+    let mut verify_fails: Vec<String> = Vec::new();
     for i in 0..p.steps.len() {
         let id = p.steps[i].id.clone();
         let prev = seen.get(&id).map(String::as_str).unwrap_or("todo");
@@ -1336,7 +1381,7 @@ fn plan_tick(
             if !out.starts_with("ok") {
                 p.steps[i].status = "doing".into();
                 dirty = true;
-                verify_failed = true;
+                verify_fails.push(id.clone());
                 note(
                     ledger,
                     ctl,
@@ -1357,7 +1402,7 @@ fn plan_tick(
     for s in &p.steps {
         seen.insert(s.id.clone(), s.status.clone());
     }
-    (p.compact(), p.open_ids(), verify_failed)
+    (p.compact(), p.open_ids(), verify_fails)
 }
 
 fn distill(client: &Client, cfg: &Config, task: &str, text: &str) -> String {
@@ -1420,6 +1465,9 @@ fn build_system(cfg: &Config, profile_system: Option<&str>, allowed: Option<&str
     }
     if allow('P') { s.push_str("P <step-id> <status> set a plan step to todo|doing|done|skip (the harness edits the plan file)
 "); }
+    if cfg.model.think.as_ref().is_some_and(|t| t.on.iter().any(|s| s == "request")) {
+        s.push_str("B <why>             request deliberation (slow, thorough thinking) for your next turns — ONLY when genuinely stuck or the step is subtle; max 2 per run\n");
+    }
     s.push_str("S <text>            say to the user and KEEP WORKING — S never ends the run. Multi-line message: `S <<` alone, then the lines, end with a line that is only \".\"\n");
     s.push_str("D <message>         the ONLY way to end the run: you are finished, or you need the user. Message is your final report (may span lines to end of message)\n");
     let plan_file = &cfg.plan.file;
