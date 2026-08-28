@@ -161,6 +161,35 @@ pub struct ModelCfg {
     /// --effort. The MAPPING is per provider, so it lives here, not in code.
     #[serde(default)]
     pub effort: BTreeMap<String, toml::value::Table>,
+    /// Escalation thinking: normally the run stays fast (whatever extra_body
+    /// says), but when the run PROVES it is stuck, the `kwargs` fragment is
+    /// merged over extra_body for the next `turns` requests. Evidence, not
+    /// vibes: the triggers are concrete failure signals the harness already
+    /// detects.
+    #[serde(default)]
+    pub think: Option<ThinkCfg>,
+}
+
+/// [model.think] — think only when not thinking has demonstrably hurt.
+#[derive(Deserialize, Clone)]
+pub struct ThinkCfg {
+    /// Body fragment (same shape as an effort preset) applied on escalated
+    /// turns, e.g. chat_template_kwargs = { enable_thinking = true }.
+    pub kwargs: toml::value::Table,
+    /// Escalation signals: "verify_fail" (auto-verify FAILed after edits),
+    /// "loop_warn" (same command giving the identical result 3x, or refused
+    /// at 5x), "collapse" (a generation degenerated and was cut).
+    #[serde(default = "d_think_on")]
+    pub on: Vec<String>,
+    /// How many model requests thinking stays on after a trigger.
+    #[serde(default = "d_think_turns")]
+    pub turns: u32,
+}
+fn d_think_on() -> Vec<String> {
+    vec!["verify_fail".into(), "loop_warn".into(), "collapse".into()]
+}
+fn d_think_turns() -> u32 {
+    2
 }
 fn d_temperature() -> f32 {
     -1.0

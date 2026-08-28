@@ -1518,3 +1518,55 @@ fn the_no_prose_rule_is_restated_last_not_only_first() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn escalation_thinking_arms_after_loop_warn() {
+    // Same command, same result, three turns running -> loop warn -> the NEXT
+    // request must carry the [model.think] kwargs; the earlier ones must not.
+    let port = mock_server(vec![
+        "X echo same\n",
+        "X echo same\n",
+        "X echo same\n",
+        "D gave up looping\n",
+    ]);
+    let toml = format!(
+        r#"
+[model]
+base_url = "http://127.0.0.1:{port}/v1"
+model = "mock"
+
+[model.think]
+kwargs = {{ chat_template_kwargs = {{ enable_thinking = true }} }}
+on = ["loop_warn"]
+turns = 1
+
+[context]
+mode = "working_set"
+budget_tokens = 8000
+max_turns = 10
+"#
+    );
+    let cfg: Config = toml::from_str(&toml).unwrap();
+    let root = temp_repo();
+    // The task string doubles as the filter key into the shared SENT log —
+    // tests run in parallel, so slicing by index would grab other tests' requests.
+    let task = "loop until the think gate arms xk9q";
+    let rep = haste::agent::run(Arc::new(cfg), root.clone(), task, None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.turns, 4, "final: {}", rep.final_msg);
+    // Clone out and DROP the lock before asserting: a panic while holding it
+    // would poison the mutex and cascade failures into unrelated tests.
+    let ours: Vec<String> = SENT.lock().unwrap().iter().filter(|b| b.contains(task)).cloned().collect();
+    assert_eq!(ours.len(), 4);
+    for (i, body) in ours.iter().enumerate().take(3) {
+        assert!(
+            !body.contains("enable_thinking"),
+            "request {i} escalated too early"
+        );
+    }
+    assert!(
+        ours[3].contains("\"enable_thinking\":true"),
+        "the post-warn request did not carry the think kwargs: {}",
+        &ours[3][..ours[3].len().min(400)]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

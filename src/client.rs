@@ -112,6 +112,19 @@ impl Client {
         images: &[(String, String)],
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<StreamStats, String> {
+        self.stream_with(system, user, images, None, on_delta)
+    }
+
+    /// `overlay`: a body fragment merged over extra_body for THIS request only
+    /// — escalation thinking ([model.think]) rides here.
+    pub fn stream_with(
+        &self,
+        system: &str,
+        user: &str,
+        images: &[(String, String)],
+        overlay: Option<&toml::value::Table>,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<StreamStats, String> {
         let user_content: Value = if images.is_empty() {
             Value::String(user.to_string())
         } else {
@@ -140,6 +153,13 @@ impl Client {
             body["temperature"] = json!(self.cfg.temperature);
         }
         self.merge_extra(&mut body);
+        if let (Some(extra), Some(obj)) = (overlay, body.as_object_mut()) {
+            for (k, v) in extra {
+                if let Ok(jv) = serde_json::to_value(v) {
+                    obj.insert(k.clone(), jv);
+                }
+            }
+        }
         let t0 = Instant::now();
         let resp = self.post(&body)?;
         let mut ttft: Option<u128> = None;
