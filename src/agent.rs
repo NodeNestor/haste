@@ -170,6 +170,7 @@ pub fn run_session(
     let mut prose_bounces = 0u32;
     // D refusals issued by the claim check (capped: a wrong checker must not trap the run).
     let mut claim_refusals = 0u32;
+    let mut spec_refusals = 0u32;
     let mut refusals = 0u32;
     let mut consec_errs = 0u32;
     // Real billed context: prompt_tokens from the provider's last usage
@@ -195,12 +196,22 @@ pub fn run_session(
     let think_after = cfg.model.think.as_ref().map(|t| t.after).unwrap_or(2);
     // B-verb requests honored so far (capped at 2 per run).
     let mut think_reqs: u32 = 0;
+    // Armings spent so far — `arms` is the run's total deliberation budget;
+    // past it every signal is ignored and the run iterates fast.
+    let think_arms = std::cell::Cell::new(0u32);
     let escalate = |think_left: &mut u32, sig: &str| -> bool {
         match &cfg.model.think {
             Some(t) if t.on.iter().any(|s| s == sig) => {
+                if think_arms.get() >= t.arms {
+                    return false;
+                }
                 let was = *think_left;
                 *think_left = (*think_left).max(t.turns);
-                was == 0 && *think_left > 0
+                let armed = was == 0 && *think_left > 0;
+                if armed {
+                    think_arms.set(think_arms.get() + 1);
+                }
+                armed
             }
             _ => false,
         }
@@ -674,8 +685,11 @@ pub fn run_session(
                 note(ledger, &ctl, depth, turn, "(B refused — deliberation was already requested twice this run; work with what you have)".into());
             } else {
                 think_reqs += 1;
-                escalate(&mut think_left, "request");
-                note(ledger, &ctl, depth, turn, format!("(deliberation on for the next turns — your reason: {})", crate::tools::clip(&why, 200)));
+                if escalate(&mut think_left, "request") || think_left > 0 {
+                    note(ledger, &ctl, depth, turn, format!("(deliberation on for the next turns — your reason: {})", crate::tools::clip(&why, 200)));
+                } else {
+                    note(ledger, &ctl, depth, turn, "(B noted, but this run's deliberation budget is spent — keep iterating fast)".into());
+                }
             }
         }
         // Auto-verify: after any editing turn, the configured check runs in a
@@ -860,6 +874,49 @@ List ONLY factual claims in the report that this evidence contradicts — a file
                                     "(D refused — your report claims things this run did not do:
 {}
 Do the work, or send a report that matches what actually happened)",
+                                    crate::tools::clip(v, 600)
+                                ),
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                // Spec check: one prompt-cached call re-reading the TASK's
+                // explicit requirements against the actual work. This is the
+                // gate for the failure claims cannot see: work that honestly
+                // matches the report while quietly misreading the spec — a
+                // function put on the wrong accessor, a named value not used
+                // exactly. The checker only compares written requirements to
+                // written code; quality is not its concern.
+                if cfg.verify.spec && depth == 0 && spec_refusals < 2 {
+                    let cuser = format!(
+                        "{}
+## CHECK
+The agent is about to finish. Re-read the TASK at the top of this document. List each EXPLICIT requirement — named files, named functions and their exact stated behavior, exact values, stated constraints — that the work above does NOT satisfy LITERALLY as written. Check the actual file contents and edits, not the final report. Judgements about quality or style are not your concern. If every explicit requirement is met, reply with exactly: OK
+",
+                        renderer.render(ledger, &ctx_cfg, turn),
+                    );
+                    let mut verdict = String::new();
+                    if let Ok(st) = client.stream(&system, &cuser, &[], &mut |d| verdict.push_str(d)) {
+                        rep.tok_in += st.prompt_tokens;
+                        rep.tok_out += st.completion_tokens;
+                        rep.model_ms += st.total_ms;
+                        let v = verdict.trim();
+                        let ok = v.is_empty()
+                            || v.eq_ignore_ascii_case("ok")
+                            || v.to_ascii_uppercase().starts_with("OK");
+                        if !ok {
+                            spec_refusals += 1;
+                            note(
+                                ledger,
+                                &ctl,
+                                depth,
+                                turn,
+                                format!(
+                                    "(D refused — explicit requirements in the task are not met literally:
+{}
+Fix these against the task's exact wording, then finish)",
                                     crate::tools::clip(v, 600)
                                 ),
                             );
@@ -1344,7 +1401,7 @@ fn plan_tick(
                 depth,
                 turn,
                 format!(
-                    "(step '{id}' started — protocol: 1. RESEARCH the code it touches (O/G/R), 2. state your approach in ONE S line, 3. implement, 4. its verify decides done)"
+                    "(step '{id}' started — protocol: 1. RESEARCH the code it touches (O/G/R), 2. state your approach in ONE S line, 3. implement, 4. its verify decides done. The verify must EXECUTE the deliverable — run the migration, run the tests, run the script — never just check that a file exists)"
                 ),
             );
         }

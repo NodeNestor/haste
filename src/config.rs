@@ -80,13 +80,19 @@ pub struct VerifyCfg {
     /// a behaviour change that deserves its own measured release.
     #[serde(default)]
     pub claims: bool,
+    /// One prompt-cached call at D: does the WORK satisfy the task's explicit
+    /// requirements LITERALLY as written? Catches the failure claims cannot
+    /// see — work that matches the report while misreading the spec. Opt-in
+    /// for the same reasons as `claims`.
+    #[serde(default)]
+    pub spec: bool,
 }
 impl Default for VerifyCfg {
     fn default() -> Self {
         // Without this, an omitted [verify] table takes bool::default() for
         // `claims` and silently disables the gate — `#[serde(default = ..)]`
         // only fires when the table exists but the key does not.
-        Self { cmd: None, timeout_ms: d_verify_timeout(), prune: d_verify_prune(), claims: false }
+        Self { cmd: None, timeout_ms: d_verify_timeout(), prune: d_verify_prune(), claims: false, spec: false }
     }
 }
 
@@ -190,6 +196,11 @@ pub struct ThinkCfg {
     /// already proof).
     #[serde(default = "d_think_after")]
     pub after: u32,
+    /// Total armings per run (all signals + B combined). Without a budget a
+    /// long verify loop re-arms forever and the run is thinking-mode in all
+    /// but name — measured at 6-9 armings and 20-minute tasks.
+    #[serde(default = "d_think_arms")]
+    pub arms: u32,
 }
 fn d_think_on() -> Vec<String> {
     vec!["verify_fail".into(), "loop_warn".into(), "collapse".into()]
@@ -198,6 +209,9 @@ fn d_think_turns() -> u32 {
     2
 }
 fn d_think_after() -> u32 {
+    2
+}
+fn d_think_arms() -> u32 {
     2
 }
 fn d_temperature() -> f32 {

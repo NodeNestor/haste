@@ -51,6 +51,8 @@ result_cap_chars = 12000 # hard cap on any single tool result, applied before pr
 # claims = false         # one prompt-cached call at D: does the final report match what the run ACTUALLY did?
                          # (harness supplies the facts - files written, commands run, errors - the model only
                          #  matches claims against them). Catches "written to out/x.json" when nothing was written.
+# spec = false           # one prompt-cached call at D: does the WORK meet the task's EXPLICIT requirements
+                         # LITERALLY as written? Catches honest work that quietly misread the spec.
 # timeout_ms = 180000
 # prune = "first_failure"
 

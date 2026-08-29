@@ -1608,3 +1608,36 @@ max_turns = 6
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn spec_check_refuses_d_until_requirements_met() {
+    // D -> spec-check verdict names an unmet requirement -> refused;
+    // second D -> verdict OK -> run ends. Cap = 1 refusal per run.
+    let port = mock_server(vec![
+        "D all done\n",
+        "The task requires applyCoupon to reduce getSubtotal; the work adds a separate getTotal instead.\n",
+        "D fixed per the exact wording\n",
+        "OK\n",
+    ]);
+    let toml = format!(
+        r#"
+[model]
+base_url = "http://127.0.0.1:{port}/v1"
+model = "mock"
+
+[verify]
+spec = true
+
+[context]
+mode = "working_set"
+budget_tokens = 8000
+max_turns = 6
+"#
+    );
+    let cfg: Config = toml::from_str(&toml).unwrap();
+    let root = temp_repo();
+    let rep = haste::agent::run(Arc::new(cfg), root.clone(), "meet the spec exactly qv3m", None, 0, haste::agent::Ctl::default());
+    assert_eq!(rep.final_msg, "fixed per the exact wording", "final: {}", rep.final_msg);
+    assert_eq!(rep.turns, 2);
+    let _ = std::fs::remove_dir_all(root);
+}
