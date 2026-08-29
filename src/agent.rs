@@ -163,6 +163,13 @@ pub fn run_session(
     let mut degens = 0u32;
     // Consecutive turns that produced only talk and no work (runaway guard).
     let mut talk_turns = 0u32;
+    // Total narration-only turns this run (streaks reset talk_turns; this
+    // does not — the model that alternates work/narrate needs the harder note).
+    let mut narrations = 0u32;
+    // Commands-executed watermark per plan step at its last verify failure:
+    // re-marking a step done without having run ANYTHING since is churn, not
+    // progress, and gets refused at dispatch instead of costing a verify turn.
+    let mut step_fails: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     // Hash of the previous talk-only turn's text: the loop breaker keys on
     // EXECUTED commands, so it cannot see a model repeating itself in prose.
     let mut last_talk: u64 = 0;
@@ -295,6 +302,7 @@ pub fn run_session(
             (String::new(), Vec::new(), Vec::new())
         };
         for id in &plan_vfails {
+            step_fails.insert(id.clone(), rep.commands as u64);
             let c = vfail_counts.entry(id.clone()).or_insert(0);
             *c += 1;
             if *c >= think_after && escalate(&mut think_left, "verify_fail") {
@@ -470,6 +478,9 @@ pub fn run_session(
             refusals: &mut refusals,
             loop_warned: &mut loop_warned,
             think_req: &mut think_req,
+            step_fails: &step_fails,
+            cmds_base: rep.commands as u64,
+            work_cmds: 0,
             done: None,
             edited: false,
             executed: 0,
@@ -669,7 +680,16 @@ pub fn run_session(
             tc.dispatch(cmd);
         }
         if nudge_continue {
-            tc.note("(S never ends the run — do the next step NOW with commands. When you are finished, or you need the user, end with D)".into());
+            narrations += 1;
+            // Unique text per occurrence (identical stacked lines are a
+            // repetition attractor), and it hardens once narration turns are
+            // clearly a habit: each one costs a full round trip.
+            let msg = match narrations {
+                1 => "(S never ends the run — do the next step NOW with commands. When you are finished, or you need the user, end with D)".to_string(),
+                2 => "(second narration-only turn — put the S and the commands in the SAME message; a solo S wastes a full round trip)".to_string(),
+                n => format!("(narration-only turn #{n} — stop narrating between actions: every message must END with commands, or with D)"),
+            };
+            tc.note(msg);
         }
         rep.commands += tc.executed;
         rep.tool_ms += tc.tool_us / 1000;
@@ -794,6 +814,7 @@ pub fn run_session(
                     let (_, open, d_vfails) =
                         plan_tick(&plan_path, &mut plan_seen, &cfg.exec.shell, &root, ledger, &ctl, depth, turn);
                     for id in &d_vfails {
+                        step_fails.insert(id.clone(), rep.commands as u64);
                         let c = vfail_counts.entry(id.clone()).or_insert(0);
                         *c += 1;
                         if *c >= think_after && escalate(&mut think_left, "verify_fail") {
@@ -1092,6 +1113,12 @@ struct TurnCtx<'a> {
     loop_warned: &'a mut bool,
     /// A `B <why>` from this turn: the model asking for deliberation.
     think_req: &'a mut Option<String>,
+    /// Commands-at-last-verify-fail per plan step (see run loop).
+    step_fails: &'a std::collections::HashMap<String, u64>,
+    /// rep.commands at turn start; + work_cmds = commands run since run start.
+    cmds_base: u64,
+    /// Real work commands this turn (everything but P/B bookkeeping).
+    work_cmds: u64,
     done: Option<String>,
     edited: bool,
     executed: usize,
@@ -1250,6 +1277,9 @@ impl TurnCtx<'_> {
         // bar while it runs, not after it finishes.
         let action = action_of(&cmd);
         self.ctl.emit(Ev::Action(self.depth, crate::tools::clip(&action, 200)));
+        if !matches!(cmd, Cmd::PlanStep { .. } | Cmd::Think { .. }) {
+            self.work_cmds += 1;
+        }
         let flat = |r: Result<String, String>| r.unwrap_or_else(|e| format!("err: {e}"));
         let mut file: Option<u32> = None;
         let result = match cmd {
@@ -1268,6 +1298,15 @@ impl TurnCtx<'_> {
             // document. Before this verb, models updated status by deleting
             // and recreating the file — hundreds of output tokens per step.
             Cmd::PlanStep { id, status } => {
+                // Re-marking a verify-failed step done without having run a
+                // single command since is churn: the verify will fail again
+                // identically. Refuse at dispatch — one line instead of a
+                // verify execution and a revert turn.
+                if status == "done"
+                    && self.step_fails.get(&id).is_some_and(|&at| self.cmds_base + self.work_cmds <= at)
+                {
+                    format!("err: step '{id}' failed its verify and you have run NOTHING since — fix the cause first, then mark it done")
+                } else {
                 let path = self.root.join(&self.cfg.plan.file);
                 match crate::plan::Plan::load(&path) {
                     None => format!("err: no {} — create it first with N", self.cfg.plan.file),
@@ -1280,6 +1319,7 @@ impl TurnCtx<'_> {
 {}", plan.compact()),
                         },
                     },
+                }
                 }
             }
             Cmd::Think { why } => {
