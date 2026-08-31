@@ -15,7 +15,7 @@ where the model stops being the bottleneck and wall-clock is
   (tool time hides inside generation time), a persistent shell daemon (~2ms per command
   vs ~150ms of shell startup), background test runs. Overhead is a CI assertion.
 
-~4.9k LOC, 7 deps, one self-contained binary. And the token-lightness cuts the
+~5.5k LOC, 7 deps, one self-contained binary. And the token-lightness cuts the
 other way too: a small local model gets fewer tokens to read, fewer chances to
 get lost, and fewer to generate — a 9B on a consumer GPU drives haste as
 happily as a wafer does.
@@ -61,6 +61,8 @@ G <regex> [target]   search        I <id> <a>       insert after line a
 O [id|dir]           outline       N <path>         create file
 X <command>          shell         V <id|path>      view an image
 A <profile> <task>   subagent      S <text>         say without finishing
+P <id> <status>      plan step → todo|doing|done|skip
+B <why>              request deliberation (see Escalation thinking)
 D <message>          done — ends the run
 <any other letter>   config/mod tool from haste.toml
 ```
@@ -85,10 +87,20 @@ perfectly) but cached tokens bill at the **full** input rate — keep
 For multi-step work the model writes `.haste/plan.json` — a live state machine the harness
 enforces: entering a step injects the research→approach→implement protocol; marking it
 done runs its `verify` and **reverts on failure** (and while its `needs` are open); `D`
-is refused until every step is done or skipped. Auto-verify runs your `[verify] cmd`
+is refused until every step is done or skipped. The protocol demands verifies that
+**execute the deliverable** — run the migration, run the tests — never just check a
+file exists; and re-marking a failed step done without running a single command since
+the failure is refused outright (the fix that cut the worst bench task from 66
+requests to 23). Auto-verify runs your `[verify] cmd`
 after every editing turn in the background. Steps with met needs are independent —
 the model farms them to parallel subagents (`A researcher <task>`), each with its own
 ledger and budget, returning only a distilled brief.
+
+With `spec = true` under `[verify]`, `D` additionally triggers one prompt-cached
+check of the finished work against the task's **literal requirements** — exact
+filenames, required sections, output formats — refusing the finish (max twice) with
+the concrete gaps. `claims = true` is the sibling that checks the final report
+against the run's recorded facts.
 
 ## Escalation thinking
 
@@ -102,14 +114,27 @@ and a ledger note tells the model why deliberation is on:
 ```toml
 [model.think]
 kwargs = { chat_template_kwargs = { enable_thinking = true } }  # your provider's mapping
-on = ["verify_fail", "loop_warn", "collapse"]
-turns = 2
+on = ["verify_fail", "loop_warn", "collapse", "request"]
+turns = 2   # thinking requests per arming
+after = 2   # arm only on the 2nd failure of the SAME plan step (debounce)
+arms = 2    # total armings per run — thinking never becomes the default mode
+
+# a hard task's total budget is therefore turns × arms thinking requests
 ```
+
+The model can also ask for it: `B <why>` (needs `"request"` in `on`) arms
+deliberation for the next turns and is prompted to fire **before** high-stakes
+work — schema/data migrations, tricky SQL, concurrency, irreversible changes —
+not just after failures. Same `arms` budget; a refused `B` costs one line.
 
 Measured on a bench task a fast model kept over-engineering: always-on thinking
 scored 0.995 but cost ~900s and 146K output tokens; fast mode ran in ~50s but
 bottomed out near 0.2. Gated, one verify failure armed a single thinking turn:
 **0.995 at 60s and 7.7K tokens**.
+
+Across the full 16-task suite against Claude Code driving the **same** local
+model, haste in fast mode matched its score within noise at ~1.7× the speed
+with ~2.9× fewer output tokens and roughly half the input tokens per request.
 
 ## Mods
 
@@ -122,7 +147,7 @@ a ripgrep override, and a prompt-only mod. Project instruction files (`HASTE.md`
 
 ## Testing
 
-`cargo test` — 79 tests: lexer, pruners, dedup, compaction and phase seals, plan
+`cargo test` — 81 tests: lexer, pruners, dedup, compaction and phase seals, plan
 gating, escalation thinking, the shell daemon, and full e2e loops against a
 scripted SSE server. CI asserts
 harness overhead <250ms/task and <5ms/render, and ships Windows/Linux/macOS binaries
